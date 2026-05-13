@@ -30,7 +30,38 @@ Database_Config :: struct {
 	experimental_features: string,  // optional comma-separated list; "" = unset
 	vfs:                   string,  // optional VFS name; "" = unset
 	busy_timeout_ms:       i64,     // applied to every new connection; <= 0 means no setter call
+
+	// async_io: when true, the library returns TURSO_IO from step/execute/finalize
+	// when it needs I/O. The wrapper transparently calls run_io() and retries, so
+	// callers still see a blocking API. Use the explicit step_once/run_io procs if
+	// you need event-loop integration.
+	async_io: bool,
+
+	// Encryption is experimental. To use, experimental_features MUST contain "encryption".
+	// cipher: cipher algorithm name, e.g. "aes256gcm", "aegis256"
+	// hexkey: encryption key as a hex string of the required length for the cipher
+	encryption_cipher: string,
+	encryption_hexkey: string,
 }
+
+// Tracing_Level mirrors raw.Tracing_Level so callers don't need to import the raw package.
+Tracing_Level :: raw.Tracing_Level
+
+// Log_Event is the Odin-side view of a turso log record.
+// The string fields BORROW the underlying C memory and are valid only for the duration
+// of the Logger_Proc invocation. Clone with strings.clone(...) to outlive the callback.
+Log_Event :: struct {
+	message:   string,
+	target:    string,
+	file:      string,
+	timestamp: u64,
+	line:      uint,
+	level:     Tracing_Level,
+}
+
+// Logger_Proc is the callback signature for receiving turso log events.
+// The Log_Event's string fields are valid only for the duration of the call.
+Logger_Proc :: proc(event: Log_Event)
 
 Step_Result :: enum {
 	Done = 0,

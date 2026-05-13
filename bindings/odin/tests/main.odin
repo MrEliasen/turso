@@ -10,6 +10,10 @@ Test_Entry :: struct {
 ALL_TESTS := [?]Test_Entry{
 	{"test_version", test_version},
 
+	// trace test must run BEFORE any other database_open so the tracing subscriber
+	// is initialized with our level. The Rust SETUP.call_once locks in level on first call.
+	{"test_trace_logger_receives_events", test_trace_logger_receives_events},
+
 	{"test_open_memory_and_autocommit", test_open_memory_and_autocommit},
 	{"test_open_file", test_open_file},
 	{"test_open_bad_path", test_open_bad_path},
@@ -43,6 +47,18 @@ ALL_TESTS := [?]Test_Entry{
 	{"test_last_insert_rowid", test_last_insert_rowid},
 
 	{"test_prepare_first_loop", test_prepare_first_loop},
+
+	{"test_encryption_open_roundtrip", test_encryption_open_roundtrip},
+	{"test_encryption_wrong_key_fails", test_encryption_wrong_key_fails},
+
+	{"test_async_io_basic_operations",     test_async_io_basic_operations},
+	{"test_async_io_step_iteration",       test_async_io_step_iteration},
+	{"test_async_io_step_once_manual_drive", test_async_io_step_once_manual_drive},
+
+	{"test_cache_reuses_prepared_statement",      test_cache_reuses_prepared_statement},
+	{"test_cache_resets_between_uses",            test_cache_resets_between_uses},
+	{"test_cache_distinct_sql_get_distinct_entries", test_cache_distinct_sql_get_distinct_entries},
+	{"test_cache_clear_releases_entries",         test_cache_clear_releases_entries},
 }
 
 main :: proc() {

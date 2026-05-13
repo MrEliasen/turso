@@ -1,23 +1,25 @@
 # Odin bindings for Turso
 
-Idiomatic Odin bindings for [Turso](https://github.com/tursodatabase/turso), a SQLite rewrite in Rust. v1 covers local databases over the synchronous C ABI exposed by `sdk-kit/turso.h`.
+Idiomatic Odin bindings for [Turso](https://github.com/tursodatabase/turso), a SQLite rewrite in Rust. Built on the C ABI exposed by `sdk-kit/turso.h`.
 
-## Status (v1)
+## Status
 
-In scope:
+Shipped:
 - Local files and `:memory:` databases
 - Prepared statements, positional + named parameter binding
 - All five SQL value kinds (INTEGER, REAL, TEXT, BLOB, NULL)
 - Column metadata (name, declared type)
 - Multi-statement parsing via `prepare_first`
 - Convenience helpers: `db_exec`, `db_exec_args`, `db_scalar_i64`
+- Encryption (`encryption_cipher` + `encryption_hexkey` in `Database_Config`, requires `experimental_features = "encryption"`)
+- Tracing logger callback (`setup(Setup_Options{log_level, logger})`)
+- Async I/O (`Database_Config.async_io = true`) with transparent `step`/`execute`/`finalize` + explicit `step_once`/`run_io` for event-loop integration
+- Statement cache (`cache_init`, `prepare_cached`, `cache_clear`, `cache_destroy`)
 
-Out of scope, tracked for follow-up:
-- `turso_sync_*` engine (push/pull/checkpoint to Turso Cloud)
-- Encryption (cipher + hex key)
-- Async I/O (`turso_statement_run_io` polling loops)
-- Tracing logger callback
-- Statement caching / reflection-based row mapping
+Deferred:
+- `turso_sync_*` engine (push/pull/checkpoint to Turso Cloud). See [SYNC_HANDOFF.md](SYNC_HANDOFF.md) for the full handoff including effort estimate, C ABI surface analysis, and a starting checklist.
+- Reflection-based row-to-struct mapping
+- Transaction helper (`db_with_transaction` block-style)
 
 ## Layout
 
@@ -25,10 +27,20 @@ Out of scope, tracked for follow-up:
 bindings/odin/
 ├── turso/          public package
 │   ├── raw/        hand-written FFI declarations matching sdk-kit/turso.h
-│   └── *.odin      wrappers using the (T, Error, bool) multi-return idiom
-├── tests/          test runner + per-area test files
+│   ├── cache.odin       statement cache
+│   ├── bind.odin        positional + named bind
+│   ├── column.odin      column metadata + row value accessors
+│   ├── connection.odin  database_open/close/connect
+│   ├── errors.odin      error type + string formatting
+│   ├── exec.odin        db_exec, db_exec_args, db_scalar_i64
+│   ├── setup.odin       global setup + tracing logger
+│   ├── statement.odin   prepare/step/execute/finalize + async step_once/run_io
+│   ├── types.odin       Database, Connection, Statement, Bind_Arg, Log_Event
+│   └── version.odin     version()
+├── tests/          test runner + per-area test files (39 tests)
 ├── examples/       minimal + named_params runnable examples
-└── Makefile        build + check + test targets
+├── Makefile        build + check + test targets
+└── SYNC_HANDOFF.md handoff notes for the sync engine (next session)
 ```
 
 ## Build the C library

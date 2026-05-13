@@ -7,11 +7,12 @@ import raw "raw"
 // Returns a Database the caller must close with database_close.
 //
 // The provided cfg.path is required; pass ":memory:" for an in-memory DB.
+//
+// To enable encryption: set experimental_features = "encryption" and supply
+// encryption_cipher (e.g. "aes256gcm") + encryption_hexkey.
+//
+// To enable logging: call setup() with a Setup_Options before database_open().
 database_open :: proc(cfg: Database_Config) -> (Database, Error, bool) {
-	if e, ok := setup(); !ok {
-		return Database{}, e, false
-	}
-
 	if cfg.path == "" {
 		return Database{}, Error{code = .MISUSE, op = "database_open", message = strings.clone("Database_Config.path is required")}, false
 	}
@@ -31,13 +32,28 @@ database_open :: proc(cfg: Database_Config) -> (Database, Error, bool) {
 	}
 	defer if c_vfs != nil { delete(c_vfs) }
 
+	c_cipher: cstring
+	if cfg.encryption_cipher != "" {
+		c_cipher = strings.clone_to_cstring(cfg.encryption_cipher, context.allocator)
+	}
+	defer if c_cipher != nil { delete(c_cipher) }
+
+	c_hexkey: cstring
+	if cfg.encryption_hexkey != "" {
+		c_hexkey = strings.clone_to_cstring(cfg.encryption_hexkey, context.allocator)
+	}
+	defer if c_hexkey != nil { delete(c_hexkey) }
+
+	async_io_flag: u64 = 0
+	if cfg.async_io { async_io_flag = 1 }
+
 	raw_cfg := raw.Database_Config{
-		async_io              = 0,  // v1: always synchronous
+		async_io              = async_io_flag,
 		path                  = c_path,
 		experimental_features = c_features,
 		vfs                   = c_vfs,
-		encryption_cipher     = nil,
-		encryption_hexkey     = nil,
+		encryption_cipher     = c_cipher,
+		encryption_hexkey     = c_hexkey,
 	}
 
 	db_handle: raw.Database_Ptr
