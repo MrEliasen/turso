@@ -133,3 +133,57 @@ jobs:
           TURSO_TEST_URL: ${{ secrets.TURSO_TEST_URL }}
           TURSO_TEST_TOKEN: ${{ secrets.TURSO_TEST_TOKEN }}
         run: make sync-test
+
+  tsan:
+    name: ThreadSanitizer stress (manual dispatch)
+    # Manual dispatch only. The race surface in the binding is two globals in
+    # turso/setup.odin (seqlock + atomic logger). Convention: anyone touching
+    # turso/setup.odin or tests/setup_seqlock_stress_test.odin should
+    # workflow_dispatch this job before merge. The rest of the workspace uses
+    # the same on-demand pattern for concurrency testing (testing/simulator
+    # is not run on every PR either). Linux only: macOS clang ships TSAN too
+    # but Apple-silicon runners have occasionally flaky TSAN behaviour with
+    # rpath-loaded dylibs.
+    if: github.event_name == 'workflow_dispatch'
+    timeout-minutes: 15
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-rust-tsan"
+          cache-on-failure: true
+
+      - uses: "./.github/shared/setup-sccache"
+
+      - name: Install Odin
+        run: |
+          set -euxo pipefail
+          mkdir -p "$HOME/odin"
+          curl -fL -o /tmp/odin.tar.gz \
+            "https://github.com/odin-lang/Odin/releases/download/${ODIN_RELEASE_TAG}/odin-ubuntu-amd64-${ODIN_RELEASE_TAG}.tar.gz"
+          tar -xzf /tmp/odin.tar.gz -C "$HOME/odin" --strip-components=1
+          echo "$HOME/odin" >> "$GITHUB_PATH"
+
+      - name: Verify Odin
+        run: odin version
+
+      - name: Build sdk-kit dylib (debug)
+        run: cargo build -p turso_sdk_kit --verbose --locked
+
+      - name: make tsan-test
+        working-directory: bindings/odin
+        env:
+          # Fail fast and print the full second_deadlock stack on a race.
+          TSAN_OPTIONS: "halt_on_error=1 second_deadlock_stack=1"
+        run: make tsan-test

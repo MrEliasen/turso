@@ -28,7 +28,7 @@ ODIN_FLAGS      := -extra-linker-flags:"$(ODIN_LINK_FLAGS)"
 # both libs would split turso_core state and crash on cross-lib pointer use.
 ODIN_SYNC_FLAGS := $(ODIN_FLAGS) -define:TURSO_USE_SYNC_DYLIB=true
 
-.PHONY: help sdk-kit sync-sdk-kit check test sync-test example examples clean
+.PHONY: help sdk-kit sync-sdk-kit check test sync-test stress-test tsan-test example examples clean
 
 help:
 	@echo "Targets:"
@@ -37,6 +37,11 @@ help:
 	@echo "  check         odin check on turso, sync, tests, every example dir"
 	@echo "  test          Build and run the local-DB test runner"
 	@echo "  sync-test     Build and run the sync test runner"
+	@echo "  stress-test   Build and run the test binary with the long iteration count"
+	@echo "                (TURSO_TSAN_STRESS=true). Catches gross concurrency failures"
+	@echo "                without the ThreadSanitizer slowdown."
+	@echo "  tsan-test     Same as stress-test plus -sanitize:thread. Race reports"
+	@echo "                exit non-zero. Intended for nightly or workflow_dispatch CI."
 	@echo "  example       Run the minimal example"
 	@echo "  examples      Run every example"
 	@echo "  clean         Remove odin build outputs"
@@ -64,6 +69,20 @@ test: sdk-kit
 sync-test: sync-sdk-kit
 	odin run tests/sync $(ODIN_SYNC_FLAGS) -out:sync_tests.bin
 
+# stress-test reuses the regular test binary but flips on the long iteration
+# count for setup_seqlock_stress (and any future stress-shaped tests). No
+# sanitizer overhead - intended as a "before you push, run this once" check.
+stress-test: sdk-kit
+	odin run tests $(ODIN_FLAGS) -define:TURSO_TSAN_STRESS=true -out:stress_tests.bin
+
+# tsan-test builds the same binary with ThreadSanitizer. A torn read of
+# g_setup_ctx or an unsynchronised access to g_logger triggers a
+# "WARNING: ThreadSanitizer: data race" line and a non-zero exit. Intended
+# for nightly or workflow_dispatch CI; on a developer laptop it takes ~5-15x
+# longer than `make test`.
+tsan-test: sdk-kit
+	odin run tests $(ODIN_FLAGS) -sanitize:thread -define:TURSO_TSAN_STRESS=true -out:tsan_tests.bin
+
 example: sdk-kit
 	odin run examples/minimal $(ODIN_FLAGS) -out:minimal.bin
 
@@ -72,4 +91,4 @@ examples: sdk-kit
 	odin run examples/named_params $(ODIN_FLAGS) -out:named_params.bin
 
 clean:
-	rm -f *.bin tests/*.bin tests/sync/*.bin examples/*/*.bin
+	rm -f *.bin tests/*.bin tests/sync/*.bin examples/*/*.bin stress_tests.bin tsan_tests.bin

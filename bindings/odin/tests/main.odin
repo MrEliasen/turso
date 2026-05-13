@@ -108,6 +108,15 @@ ALL_TESTS := [?]Test_Entry{
 	{"test_bind_u64_wraps_to_i64",                            test_bind_u64_wraps_to_i64},
 	{"test_bind_f32_widens_to_f64",                           test_bind_f32_widens_to_f64},
 	{"test_stmt_scan_struct_handles_more_than_stack_cols",    test_stmt_scan_struct_handles_more_than_stack_cols},
+
+	// Concurrency stress: exercises the setup() seqlock + atomic logger from
+	// two threads. Iteration count scales with -define:TURSO_TSAN_STRESS so
+	// the same test serves the cheap default and the long TSAN run.
+	{"test_setup_seqlock_stress",                             test_setup_seqlock_stress},
+	// One Database, two Connections, two threads. Validates the documented
+	// Send+Sync contract on Database under TSAN and confirms cross-connection
+	// state visibility on a normal build.
+	{"test_two_connections_two_threads",                      test_two_connections_two_threads},
 }
 
 main :: proc() {

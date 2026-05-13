@@ -19,13 +19,18 @@ g_logger: Logger_Proc
 // can install it before invoking the user callback. "c" procs do not carry an
 // Odin context.
 //
-// The Context value is a struct, not a pointer, so it cannot be atomic-loaded
-// directly. We accept that callers wanting safe logger replacement across
-// threads should either (a) only call setup() at startup before the first
-// database is opened, or (b) drain any pending log emits before swapping.
-// The README documents (a) as the supported pattern.
+// runtime.Context is a struct (allocator, temp_allocator, logger, user_ptr,
+// random_generator, assertion handler) so it is too wide for a single atomic
+// load. We pair it with a seqlock counter (g_setup_ctx_seq): writers bracket
+// the bytewise copy with two atomic increments, readers bracket the bytewise
+// read with two atomic loads and retry on disagreement. While a writer is
+// active the trampoline drops the log event rather than reading torn state.
+// Writers are serialized by g_setup_mu so the counter never wraps oddly.
 @(private)
 g_setup_ctx: runtime.Context
+
+@(private)
+g_setup_ctx_seq: u64  // even = stable, odd = writer in progress
 
 @(private)
 g_logger_store :: proc(p: Logger_Proc) {
@@ -37,15 +42,40 @@ g_logger_load :: proc "contextless" () -> Logger_Proc {
 	return intrinsics.atomic_load(&g_logger)
 }
 
+// g_setup_ctx_store publishes a new Context for the trampoline to install.
+// Caller must hold g_setup_mu so that two writers cannot interleave their
+// bracket increments and corrupt the parity invariant.
 @(private)
 g_setup_ctx_store :: proc(ctx: runtime.Context) {
+	s := intrinsics.atomic_load(&g_setup_ctx_seq)
+	intrinsics.atomic_store(&g_setup_ctx_seq, s + 1)  // odd: writer entered
 	g_setup_ctx = ctx
+	intrinsics.atomic_store(&g_setup_ctx_seq, s + 2)  // even: writer exited
+}
+
+// g_setup_ctx_load returns the latest published Context, or ok=false when a
+// writer is mid-publish (and the trampoline should drop the event rather than
+// risk a torn read). Bounded retries so a misbehaving writer cannot pin the
+// trampoline in a spin.
+@(private)
+g_setup_ctx_load :: proc "contextless" () -> (runtime.Context, bool) {
+	MAX_RETRIES :: 8
+	for _ in 0 ..< MAX_RETRIES {
+		s1 := intrinsics.atomic_load(&g_setup_ctx_seq)
+		if s1 & 1 == 1 { continue }
+		ctx := g_setup_ctx
+		s2 := intrinsics.atomic_load(&g_setup_ctx_seq)
+		if s1 == s2 { return ctx, true }
+	}
+	return runtime.Context{}, false
 }
 
 @(private)
 logger_trampoline :: proc "c" (log: ^raw.Log_Struct) {
 	if log == nil { return }
-	context = g_setup_ctx
+	ctx, ok := g_setup_ctx_load()
+	if !ok { return }  // setup writer was active; skip this event
+	context = ctx
 	fn := g_logger_load()
 	if fn == nil { return }
 	event := Log_Event{
