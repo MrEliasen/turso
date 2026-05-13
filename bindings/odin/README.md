@@ -48,11 +48,10 @@ bindings/odin/
 │   ├── statement.odin      prepare/step/execute/finalize + async step_once/run_io
 │   ├── types.odin          Database, Connection, Statement, Bind_Arg, Log_Event
 │   └── version.odin        version()
-├── tests/                  local-DB test runner (60 tests)
-│   └── sync/               sync test binary (31 tests; built via make sync-test)
+├── tests/                  local-DB test runner (67 tests)
+│   └── sync/               sync test binary (32 tests; built via make sync-test)
 ├── examples/               minimal + named_params runnable examples
-├── Makefile                build + check + test targets
-└── SYNC_HANDOFF.md         legacy sync engine handoff (now landed; see Sync engine below)
+└── Makefile                build + check + test targets
 ```
 
 ## Build the C library
@@ -71,8 +70,8 @@ Produces `target/debug/libturso_sdk_kit.{dylib,so,dll}`.
 ```sh
 cd bindings/odin
 make check       # static check (no link)
-make test        # local-DB test suite (60 tests)
-make sync-test   # sync engine test suite (31 tests, builds libturso_sync_sdk_kit; cloud E2E gated by TURSO_TEST_URL / TURSO_TEST_TOKEN)
+make test        # local-DB test suite (67 tests)
+make sync-test   # sync engine test suite (32 tests, builds libturso_sync_sdk_kit; cloud E2E gated by TURSO_TEST_URL / TURSO_TEST_TOKEN)
 make example     # runs examples/minimal
 make examples    # runs every example
 ```
@@ -157,9 +156,9 @@ Per `sdk-kit/turso.h`:
 
 ## Error handling
 
-Every fallible proc returns `(Value, Error, bool)`. Inspect `ok` first; on failure call `turso.error_string(err)` for a formatted diagnostic and `turso.error_destroy(&err)` to release the owned message.
+Every fallible proc returns `(Value, Error, bool)`. Inspect `ok` first; on failure call `turso.error_string(err)` for a formatted diagnostic and `turso.error_destroy(&err)` to release the owned strings.
 
-`Error` is a struct of `code` (Turso status code), `message` (owned string from C, or empty), `sql` (borrowed, the failing SQL if known), `op` (static call-site label), and `ctx` (optional caller-supplied context).
+`Error` is a struct of `code` (Turso status code), `message` (owned string from C, or empty), `sql` (owned; the failing SQL if known), `op` (static call-site label), and `ctx` (borrowed caller-supplied context). `error_destroy` frees `message` AND `sql`.
 
 ## Sync engine
 
@@ -231,6 +230,6 @@ The canonical C ABI is `sdk-kit/turso.h` (local DB) plus `sync/sdk-kit/turso_syn
 
 ## Testing
 
-`make test` runs every `test_*` proc in `tests/` (registered in `tests/main.odin`). Helpers in `tests/test_utils.odin` provide `expect_*` assertions; failure prints location + reason and exits non-zero.
+`make test` runs every `test_*` proc registered in the `ALL_TESTS` array in `tests/main.odin`. Helpers in `tests/test_utils.odin` provide `expect_*` assertions; failure prints location + reason and exits non-zero. Both test runners wrap `context.allocator` in a `mem.Tracking_Allocator` and print a leak report at the end of the run — any non-empty report is a regression.
 
-To run a subset, add a CLI flag scheme or comment out entries in `all_tests()` while iterating locally.
+To run a subset, add a CLI flag scheme or comment out entries in `ALL_TESTS` while iterating locally.
