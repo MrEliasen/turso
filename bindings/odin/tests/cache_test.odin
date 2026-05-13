@@ -28,7 +28,7 @@ test_cache_resets_between_uses :: proc() {
 	defer test_db_close(&t)
 	exec_ok(t.conn, "CREATE TABLE t(v INTEGER)")
 	for i in 1 ..= 3 {
-		_, _, _ = turso.db_exec_args(t.conn, "INSERT INTO t(v) VALUES (?)", turso.bind_int(i64(i)))
+		_, _, _ = turso.conn_exec_args(t.conn, "INSERT INTO t(v) VALUES (?)", turso.bind_int(i64(i)))
 	}
 
 	cache := turso.cache_init()

@@ -158,15 +158,15 @@ test_sync_bootstrap_from_captured_pages :: proc() {
 	src_conn, e2, ok2 := turso.connect(src_db)
 	expect_no_err(e2, ok2, "connect source DB")
 
-	_, e3, ok3 := turso.db_exec(src_conn, "CREATE TABLE marker(id INTEGER PRIMARY KEY, v TEXT)")
+	_, e3, ok3 := turso.conn_exec(src_conn, "CREATE TABLE marker(id INTEGER PRIMARY KEY, v TEXT)")
 	expect_no_err(e3, ok3, "CREATE TABLE marker")
-	_, e4, ok4 := turso.db_exec_args(src_conn, "INSERT INTO marker(v) VALUES (?)", turso.bind_text("hello"))
+	_, e4, ok4 := turso.conn_exec_args(src_conn, "INSERT INTO marker(v) VALUES (?)", turso.bind_text("hello"))
 	expect_no_err(e4, ok4, "INSERT row")
 
 	// PRAGMA wal_checkpoint(TRUNCATE) ensures the main file holds every page —
 	// otherwise the WAL would still own the latest writes and the captured
 	// bytes would be inconsistent (header says N pages, file shows fewer).
-	_, e5, ok5 := turso.db_exec(src_conn, "PRAGMA wal_checkpoint(TRUNCATE)")
+	_, e5, ok5 := turso.conn_exec(src_conn, "PRAGMA wal_checkpoint(TRUNCATE)")
 	expect_no_err(e5, ok5, "checkpoint source DB")
 
 	turso.conn_close(&src_conn)

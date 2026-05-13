@@ -12,10 +12,20 @@ import raw "raw"
 // encryption_cipher (e.g. "aes256gcm") + encryption_hexkey.
 //
 // To enable logging: call setup() with a Setup_Options before database_open().
+//
+// All string fields are validated for embedded NUL bytes up front. Any NUL
+// would otherwise truncate the C-string handed to the Rust side and produce a
+// silently-wrong config; a typed MISUSE error is friendlier.
 database_open :: proc(cfg: Database_Config) -> (Database, Error, bool) {
 	if cfg.path == "" {
 		return Database{}, make_error(.MISUSE, "database_open", "Database_Config.path is required"), false
 	}
+
+	if e, ok := must_be_nul_free(cfg.path,                  "database_open", "Database_Config.path");                  !ok { return Database{}, e, false }
+	if e, ok := must_be_nul_free(cfg.experimental_features, "database_open", "Database_Config.experimental_features"); !ok { return Database{}, e, false }
+	if e, ok := must_be_nul_free(cfg.vfs,                   "database_open", "Database_Config.vfs");                   !ok { return Database{}, e, false }
+	if e, ok := must_be_nul_free(cfg.encryption_cipher,     "database_open", "Database_Config.encryption_cipher");     !ok { return Database{}, e, false }
+	if e, ok := must_be_nul_free(cfg.encryption_hexkey,     "database_open", "Database_Config.encryption_hexkey");     !ok { return Database{}, e, false }
 
 	c_path := strings.clone_to_cstring(cfg.path, context.allocator)
 	defer delete(c_path)
@@ -42,7 +52,7 @@ database_open :: proc(cfg: Database_Config) -> (Database, Error, bool) {
 	if cfg.encryption_hexkey != "" {
 		c_hexkey = strings.clone_to_cstring(cfg.encryption_hexkey, context.allocator)
 	}
-	defer if c_hexkey != nil { delete(c_hexkey) }
+	defer if c_hexkey != nil { delete_zeroed_cstring(c_hexkey) }
 
 	async_io_flag: u64 = 0
 	if cfg.async_io { async_io_flag = 1 }
@@ -97,6 +107,11 @@ connect :: proc(db: Database) -> (Connection, Error, bool) {
 	return Connection{handle = conn_handle, db = db.handle}, error_none(), true
 }
 
+// set_busy_timeout, get_autocommit, and last_insert_rowid silently no-op on a
+// closed Connection. Use `conn_is_open(conn)` before calling them if you need
+// to distinguish "value of 0 / false" from "connection was already closed".
+// This shape mirrors SQLite's own C API, which treats most accessors on a
+// closed handle as benign rather than as errors.
 set_busy_timeout :: proc(conn: Connection, ms: i64) {
 	if conn.handle == nil { return }
 	raw.turso_connection_set_busy_timeout_ms(conn.handle, ms)

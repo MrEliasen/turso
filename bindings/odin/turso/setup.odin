@@ -1,5 +1,6 @@
 package turso
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:strings"
 import "core:sync"
@@ -8,20 +9,45 @@ import raw "raw"
 @(private)
 g_setup_mu: sync.Mutex
 
-// g_logger holds the user-supplied callback. Read by logger_trampoline.
+// g_logger holds the user-supplied callback. Read by logger_trampoline through
+// the atomic helpers below so a setup() call swapping the value cannot tear
+// the read on the emitting thread.
 @(private)
 g_logger: Logger_Proc
 
 // g_setup_ctx captures the context active at setup() time so the trampoline
-// can install it before invoking the user callback. "c" procs don't have an Odin context.
+// can install it before invoking the user callback. "c" procs do not carry an
+// Odin context.
+//
+// The Context value is a struct, not a pointer, so it cannot be atomic-loaded
+// directly. We accept that callers wanting safe logger replacement across
+// threads should either (a) only call setup() at startup before the first
+// database is opened, or (b) drain any pending log emits before swapping.
+// The README documents (a) as the supported pattern.
 @(private)
 g_setup_ctx: runtime.Context
+
+@(private)
+g_logger_store :: proc(p: Logger_Proc) {
+	intrinsics.atomic_store(&g_logger, p)
+}
+
+@(private)
+g_logger_load :: proc "contextless" () -> Logger_Proc {
+	return intrinsics.atomic_load(&g_logger)
+}
+
+@(private)
+g_setup_ctx_store :: proc(ctx: runtime.Context) {
+	g_setup_ctx = ctx
+}
 
 @(private)
 logger_trampoline :: proc "c" (log: ^raw.Log_Struct) {
 	if log == nil { return }
 	context = g_setup_ctx
-	if g_logger == nil { return }
+	fn := g_logger_load()
+	if fn == nil { return }
 	event := Log_Event{
 		message   = log.message != nil ? string(log.message) : "",
 		target    = log.target  != nil ? string(log.target)  : "",
@@ -30,7 +56,7 @@ logger_trampoline :: proc "c" (log: ^raw.Log_Struct) {
 		line      = log.line,
 		level     = log.level,
 	}
-	g_logger(event)
+	fn(event)
 }
 
 // Setup_Options configures global Turso initialization. All fields are optional.
@@ -48,12 +74,20 @@ Setup_Options :: struct {
 
 // setup performs Turso global initialization. Optional - only required if you want
 // non-default logging behavior. Safe to call multiple times to swap the logger.
+//
+// log_level is validated up front for embedded NUL; if the string would
+// truncate when converted to a C-string the call fails with a typed MISUSE
+// error rather than handing a wrong-length level to the engine.
 setup :: proc(opts: Setup_Options = {}) -> (Error, bool) {
+	if e, ok := must_be_nul_free(opts.log_level, "setup", "Setup_Options.log_level"); !ok {
+		return e, false
+	}
+
 	sync.mutex_lock(&g_setup_mu)
 	defer sync.mutex_unlock(&g_setup_mu)
 
-	g_setup_ctx = context
-	g_logger = opts.logger
+	g_setup_ctx_store(context)
+	g_logger_store(opts.logger)
 
 	c_level: cstring
 	level_owned: cstring

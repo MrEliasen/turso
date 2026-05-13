@@ -34,7 +34,7 @@ test_encryption_open_roundtrip :: proc() {
 	conn, e2, ok2 := turso.connect(db)
 	expect_no_err(e2, ok2, "connect to encrypted DB")
 	exec_ok(conn, "CREATE TABLE t(v TEXT)")
-	_, e3, ok3 := turso.db_exec_args(conn, "INSERT INTO t(v) VALUES (?)", turso.bind_text("secret"))
+	_, e3, ok3 := turso.conn_exec_args(conn, "INSERT INTO t(v) VALUES (?)", turso.bind_text("secret"))
 	expect_no_err(e3, ok3, "insert into encrypted DB")
 	_, _ = turso.conn_close(&conn)
 	turso.database_close(&db)
@@ -84,7 +84,7 @@ test_encryption_wrong_key_fails :: proc() {
 		// Open succeeded; reading should fail because decryption breaks.
 		conn2, _, _ := turso.connect(db2)
 		defer { _, _ = turso.conn_close(&conn2) }
-		_, read_err, read_ok := turso.db_scalar_i64(conn2, "SELECT COUNT(*) FROM t")
+		_, read_err, read_ok := turso.conn_scalar_i64(conn2, "SELECT COUNT(*) FROM t")
 		defer turso.error_destroy(&read_err)
 		expect_false(read_ok, "querying with wrong key must fail")
 	}
@@ -119,10 +119,10 @@ test_encryption_wal_checkpoint_and_reopen :: proc() {
 		exec_ok(conn, "INSERT INTO t(v) VALUES ('alpha'), ('beta'), ('gamma')")
 
 		// PRAGMA wal_checkpoint flushes WAL frames into the main DB file.
-		// db_exec returns an error if the engine refuses; we accept any
+		// conn_exec returns an error if the engine refuses; we accept any
 		// outcome (some Turso build modes treat PRAGMA as no-op) provided
 		// the data is still queryable after reopen.
-		_, _, _ = turso.db_exec(conn, "PRAGMA wal_checkpoint(TRUNCATE)")
+		_, _, _ = turso.conn_exec(conn, "PRAGMA wal_checkpoint(TRUNCATE)")
 	}
 
 	db2, err2, ok2 := turso.database_open(cfg)
@@ -132,7 +132,7 @@ test_encryption_wal_checkpoint_and_reopen :: proc() {
 	expect_no_err(ce2, cok2, "connect to reopened DB")
 	defer { _, _ = turso.conn_close(&conn2) }
 
-	count, qe, qok := turso.db_scalar_i64(conn2, "SELECT COUNT(*) FROM t")
+	count, qe, qok := turso.conn_scalar_i64(conn2, "SELECT COUNT(*) FROM t")
 	expect_no_err(qe, qok, "count rows after checkpoint+reopen")
 	expect_eq(count, i64(3), "all rows must survive WAL checkpoint and reopen")
 }
@@ -162,12 +162,12 @@ test_encryption_plaintext_absent_in_file :: proc() {
 	conn, ce, cok := turso.connect(db)
 	expect_no_err(ce, cok, "connect for plaintext check")
 	exec_ok(conn, "CREATE TABLE t(v TEXT)")
-	_, ie, iok := turso.db_exec_args(
+	_, ie, iok := turso.conn_exec_args(
 		conn, "INSERT INTO t(v) VALUES (?)", turso.bind_text(PAYLOAD),
 	)
 	expect_no_err(ie, iok, "insert sentinel payload")
 	// Force WAL → main file so the on-disk bytes reflect the insert.
-	_, _, _ = turso.db_exec(conn, "PRAGMA wal_checkpoint(TRUNCATE)")
+	_, _, _ = turso.conn_exec(conn, "PRAGMA wal_checkpoint(TRUNCATE)")
 	_, _ = turso.conn_close(&conn)
 	turso.database_close(&db)
 

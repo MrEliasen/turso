@@ -7,7 +7,9 @@ import raw "raw"
 @(private)
 bind_status :: proc(stmt: Statement, code: Status_Code, op: string) -> (Error, bool) {
 	if code == .OK { return error_none(), true }
-	return make_error(code, op, status_name(code), stmt.sql), false
+	name := status_name(code)
+	defer delete(name)
+	return make_error(code, op, name, stmt.sql), false
 }
 
 stmt_bind_null :: proc(stmt: Statement, position: int) -> (Error, bool) {
@@ -42,15 +44,21 @@ stmt_bind_blob :: proc(stmt: Statement, position: int, value: []u8) -> (Error, b
 	return bind_status(stmt, code, "stmt_bind_blob")
 }
 
-// stmt_param_position returns the 1-based position of a named parameter, or 0 if not found.
-// The name should include the SQL prefix (e.g. ":start", "?1", "$x").
-stmt_param_position :: proc(stmt: Statement, name: string) -> int {
-	if stmt.handle == nil || name == "" { return 0 }
+// stmt_param_position returns the 1-based position of a named parameter, plus
+// a found flag. The name should include the SQL prefix (e.g. ":start", "?1",
+// "$x"). Returns (0, false) for the not-found case so callers can distinguish
+// it from any future addition of position 0. An embedded NUL in the name is
+// likewise treated as not-found.
+stmt_param_position :: proc(stmt: Statement, name: string) -> (int, bool) {
+	if stmt.handle == nil || name == "" { return 0, false }
+	for i in 0 ..< len(name) {
+		if name[i] == 0x00 { return 0, false }
+	}
 	c_name := strings.clone_to_cstring(name, context.allocator)
 	defer delete(c_name)
 	pos := raw.turso_statement_named_position(stmt.handle, c_name)
-	if pos <= 0 { return 0 }
-	return int(pos)
+	if pos <= 0 { return 0, false }
+	return int(pos), true
 }
 
 // stmt_param_name returns the name of the parameter at index (1-based), including the SQL prefix.
@@ -91,8 +99,8 @@ stmt_bind_args :: proc(stmt: Statement, args: ..Bind_Arg) -> (Error, bool) {
 }
 
 stmt_bind_named :: proc(stmt: Statement, name: string, arg: Bind_Arg) -> (Error, bool) {
-	pos := stmt_param_position(stmt, name)
-	if pos == 0 {
+	pos, found := stmt_param_position(stmt, name)
+	if !found {
 		msg := fmt.aprintf("named parameter not found: %q", name)
 		defer delete(msg)
 		return make_error(.MISUSE, "stmt_bind_named", msg, stmt.sql), false

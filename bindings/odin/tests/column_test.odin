@@ -34,7 +34,7 @@ test_row_value_kinds :: proc() {
 	defer test_db_close(&t)
 	exec_ok(t.conn, "CREATE TABLE t(i INTEGER, r REAL, s TEXT, b BLOB, n)")
 
-	_, e, ok := turso.db_exec_args(
+	_, e, ok := turso.conn_exec_args(
 		t.conn,
 		"INSERT INTO t(i, r, s, b, n) VALUES (?, ?, ?, ?, ?)",
 		turso.bind_int(7),
@@ -74,7 +74,7 @@ test_get_blob_independence :: proc() {
 	defer test_db_close(&t)
 	exec_ok(t.conn, "CREATE TABLE t(b BLOB)")
 	payload := []u8{9, 9, 9, 9}
-	_, e, ok := turso.db_exec_args(t.conn, "INSERT INTO t(b) VALUES (?)", turso.bind_blob(payload))
+	_, e, ok := turso.conn_exec_args(t.conn, "INSERT INTO t(b) VALUES (?)", turso.bind_blob(payload))
 	expect_no_err(e, ok, "insert blob")
 
 	stmt := prep_ok(t.conn, "SELECT b FROM t LIMIT 1")
@@ -87,4 +87,51 @@ test_get_blob_independence :: proc() {
 	for b in got {
 		expect_eq(b, u8(9), "blob bytes preserved post-finalize")
 	}
+}
+
+// stmt_get_text_ok distinguishes a SQL NULL from a present-but-empty TEXT.
+// Generic row code can rely on the second return rather than having to pair
+// the call with stmt_is_null.
+test_get_text_ok_distinguishes_null_from_empty :: proc() {
+	t := test_db_open_memory()
+	defer test_db_close(&t)
+	exec_ok(t.conn, "CREATE TABLE t(v TEXT)")
+	_, _, _ = turso.conn_exec_args(t.conn, "INSERT INTO t(v) VALUES (?)", turso.bind_null())
+	_, _, _ = turso.conn_exec_args(t.conn, "INSERT INTO t(v) VALUES (?)", turso.bind_text(""))
+
+	stmt := prep_ok(t.conn, "SELECT v FROM t ORDER BY rowid")
+	defer finalize_ok(&stmt)
+
+	step_expect_row(stmt)
+	null_val, null_ok := turso.stmt_get_text_ok(stmt, 0)
+	expect_false(null_ok, "stmt_get_text_ok must report NULL as ok=false")
+	expect_eq(null_val, "", "stmt_get_text_ok returns empty string for NULL")
+
+	step_expect_row(stmt)
+	empty_val, empty_ok := turso.stmt_get_text_ok(stmt, 0)
+	expect_true(empty_ok, "stmt_get_text_ok must report empty TEXT as ok=true")
+	expect_eq(empty_val, "", "stmt_get_text_ok returns empty string for empty TEXT")
+}
+
+// stmt_get_blob_ok mirrors stmt_get_text_ok for BLOBs.
+test_get_blob_ok_distinguishes_null_from_empty :: proc() {
+	t := test_db_open_memory()
+	defer test_db_close(&t)
+	exec_ok(t.conn, "CREATE TABLE t(v BLOB)")
+	_, _, _ = turso.conn_exec_args(t.conn, "INSERT INTO t(v) VALUES (?)", turso.bind_null())
+	_, _, _ = turso.conn_exec_args(t.conn, "INSERT INTO t(v) VALUES (?)", turso.bind_blob([]u8{}))
+
+	stmt := prep_ok(t.conn, "SELECT v FROM t ORDER BY rowid")
+	defer finalize_ok(&stmt)
+
+	step_expect_row(stmt)
+	null_val, null_ok := turso.stmt_get_blob_ok(stmt, 0)
+	expect_false(null_ok, "stmt_get_blob_ok must report NULL as ok=false")
+	expect_eq(len(null_val), 0, "stmt_get_blob_ok returns no bytes for NULL")
+
+	step_expect_row(stmt)
+	empty_val, empty_ok := turso.stmt_get_blob_ok(stmt, 0)
+	defer delete(empty_val)
+	expect_true(empty_ok, "stmt_get_blob_ok must report empty BLOB as ok=true")
+	expect_eq(len(empty_val), 0, "stmt_get_blob_ok returns zero-length slice for empty BLOB")
 }

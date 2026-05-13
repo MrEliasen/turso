@@ -43,33 +43,59 @@ stmt_get_double :: proc(stmt: Statement, index: int) -> f64 {
 	return raw.turso_statement_row_value_double(stmt.handle, uint(index))
 }
 
-// stmt_get_text returns a copy of the column's text value. The underlying C pointer
-// is only valid until the next step/reset/finalize (turso.h:253-254) so we copy here.
-// Returns "" for NULL or non-text columns.
+// stmt_get_text returns a copy of the column's text value. The underlying C
+// pointer is only valid until the next step/reset/finalize (turso.h:253-254)
+// so we copy here. Returns "" for NULL, non-text columns, or out-of-range
+// indices. Use stmt_get_text_ok when distinguishing a real NULL from an
+// empty string matters.
 stmt_get_text :: proc(stmt: Statement, index: int, allocator := context.allocator) -> string {
-	if stmt.handle == nil || index < 0 { return "" }
-	if stmt_is_null(stmt, index) { return "" }
-	count := raw.turso_statement_row_value_bytes_count(stmt.handle, uint(index))
-	if count <= 0 { return "" }
-	ptr := raw.turso_statement_row_value_bytes_ptr(stmt.handle, uint(index))
-	if ptr == nil { return "" }
-	src := ptr[:int(count)]
-	out := make([]u8, int(count), allocator)
-	copy(out, src)
-	return string(out)
+	out, _ := stmt_get_text_ok(stmt, index, allocator)
+	return out
 }
 
-// stmt_get_blob returns a copy of the column's blob value. Same lifetime story as stmt_get_text.
-stmt_get_blob :: proc(stmt: Statement, index: int, allocator := context.allocator) -> []u8 {
-	if stmt.handle == nil || index < 0 { return nil }
-	if stmt_is_null(stmt, index) { return nil }
+// stmt_get_text_ok mirrors stmt_get_text but also reports whether a non-NULL
+// TEXT value was read. The second return is false for SQL NULL, for non-text
+// kinds, and for the closed-handle / bad-index cases; in those cases the
+// returned string is "". Caller still owns and must delete the string when
+// the second return is true.
+stmt_get_text_ok :: proc(stmt: Statement, index: int, allocator := context.allocator) -> (string, bool) {
+	if stmt.handle == nil || index < 0 { return "", false }
+	kind := stmt_value_kind(stmt, index)
+	if kind == .NULL { return "", false }
+	if kind != .TEXT { return "", false }
 	count := raw.turso_statement_row_value_bytes_count(stmt.handle, uint(index))
-	if count < 0 { return nil }
-	if count == 0 { return make([]u8, 0, allocator) }
+	if count < 0 { return "", false }
+	if count == 0 { return "", true }
 	ptr := raw.turso_statement_row_value_bytes_ptr(stmt.handle, uint(index))
-	if ptr == nil { return nil }
+	if ptr == nil { return "", false }
 	src := ptr[:int(count)]
 	out := make([]u8, int(count), allocator)
 	copy(out, src)
+	return string(out), true
+}
+
+// stmt_get_blob returns a copy of the column's blob value. Same lifetime story
+// as stmt_get_text. Returns nil for NULL or non-blob columns, and the empty
+// slice for a present-but-zero-length BLOB. Use stmt_get_blob_ok if you need
+// to distinguish "no value" from "zero-length value" without falling back to
+// stmt_is_null.
+stmt_get_blob :: proc(stmt: Statement, index: int, allocator := context.allocator) -> []u8 {
+	out, _ := stmt_get_blob_ok(stmt, index, allocator)
 	return out
+}
+
+stmt_get_blob_ok :: proc(stmt: Statement, index: int, allocator := context.allocator) -> ([]u8, bool) {
+	if stmt.handle == nil || index < 0 { return nil, false }
+	kind := stmt_value_kind(stmt, index)
+	if kind == .NULL { return nil, false }
+	if kind != .BLOB { return nil, false }
+	count := raw.turso_statement_row_value_bytes_count(stmt.handle, uint(index))
+	if count < 0 { return nil, false }
+	if count == 0 { return make([]u8, 0, allocator), true }
+	ptr := raw.turso_statement_row_value_bytes_ptr(stmt.handle, uint(index))
+	if ptr == nil { return nil, false }
+	src := ptr[:int(count)]
+	out := make([]u8, int(count), allocator)
+	copy(out, src)
+	return out, true
 }

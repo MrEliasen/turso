@@ -12,10 +12,10 @@ test_bind_int :: proc() {
 	defer test_db_close(&t)
 	roundtrip_setup(&t, "CREATE TABLE t(v INTEGER)")
 
-	_, e, ok := turso.db_exec_args(t.conn, "INSERT INTO t(v) VALUES (?)", turso.bind_int(42))
+	_, e, ok := turso.conn_exec_args(t.conn, "INSERT INTO t(v) VALUES (?)", turso.bind_int(42))
 	expect_no_err(e, ok, "insert int")
 
-	got, e2, ok2 := turso.db_scalar_i64(t.conn, "SELECT v FROM t LIMIT 1")
+	got, e2, ok2 := turso.conn_scalar_i64(t.conn, "SELECT v FROM t LIMIT 1")
 	expect_no_err(e2, ok2, "scalar i64")
 	expect_eq(got, i64(42), "bind_int roundtrip")
 }
@@ -25,7 +25,7 @@ test_bind_double :: proc() {
 	defer test_db_close(&t)
 	roundtrip_setup(&t, "CREATE TABLE t(v REAL)")
 
-	_, e, ok := turso.db_exec_args(t.conn, "INSERT INTO t(v) VALUES (?)", turso.bind_double(2.5))
+	_, e, ok := turso.conn_exec_args(t.conn, "INSERT INTO t(v) VALUES (?)", turso.bind_double(2.5))
 	expect_no_err(e, ok, "insert double")
 
 	stmt := prep_ok(t.conn, "SELECT v FROM t LIMIT 1")
@@ -40,7 +40,7 @@ test_bind_text :: proc() {
 	defer test_db_close(&t)
 	roundtrip_setup(&t, "CREATE TABLE t(v TEXT)")
 
-	_, e, ok := turso.db_exec_args(t.conn, "INSERT INTO t(v) VALUES (?)", turso.bind_text("hello world"))
+	_, e, ok := turso.conn_exec_args(t.conn, "INSERT INTO t(v) VALUES (?)", turso.bind_text("hello world"))
 	expect_no_err(e, ok, "insert text")
 
 	stmt := prep_ok(t.conn, "SELECT v FROM t LIMIT 1")
@@ -57,7 +57,7 @@ test_bind_blob :: proc() {
 	roundtrip_setup(&t, "CREATE TABLE t(v BLOB)")
 
 	payload := []u8{1, 2, 3, 4, 5}
-	_, e, ok := turso.db_exec_args(t.conn, "INSERT INTO t(v) VALUES (?)", turso.bind_blob(payload))
+	_, e, ok := turso.conn_exec_args(t.conn, "INSERT INTO t(v) VALUES (?)", turso.bind_blob(payload))
 	expect_no_err(e, ok, "insert blob")
 
 	stmt := prep_ok(t.conn, "SELECT v FROM t LIMIT 1")
@@ -76,7 +76,7 @@ test_bind_null :: proc() {
 	defer test_db_close(&t)
 	roundtrip_setup(&t, "CREATE TABLE t(v)")
 
-	_, e, ok := turso.db_exec_args(t.conn, "INSERT INTO t(v) VALUES (?)", turso.bind_null())
+	_, e, ok := turso.conn_exec_args(t.conn, "INSERT INTO t(v) VALUES (?)", turso.bind_null())
 	expect_no_err(e, ok, "insert null")
 
 	stmt := prep_ok(t.conn, "SELECT v FROM t LIMIT 1")
@@ -93,9 +93,17 @@ test_named_position_lookup :: proc() {
 	stmt := prep_ok(t.conn, "SELECT :start, :stop")
 	defer finalize_ok(&stmt)
 
-	expect_eq(turso.stmt_param_position(stmt, ":start"), 1, ":start is position 1")
-	expect_eq(turso.stmt_param_position(stmt, ":stop"), 2, ":stop is position 2")
-	expect_eq(turso.stmt_param_position(stmt, ":missing"), 0, ":missing not found returns 0")
+	start_pos, start_found := turso.stmt_param_position(stmt, ":start")
+	expect_true(start_found, ":start must be found")
+	expect_eq(start_pos, 1, ":start is position 1")
+
+	stop_pos, stop_found := turso.stmt_param_position(stmt, ":stop")
+	expect_true(stop_found, ":stop must be found")
+	expect_eq(stop_pos, 2, ":stop is position 2")
+
+	missing_pos, missing_found := turso.stmt_param_position(stmt, ":missing")
+	expect_false(missing_found, ":missing must not be found")
+	expect_eq(missing_pos, 0, ":missing returns position 0 when not found")
 }
 
 test_named_bind :: proc() {

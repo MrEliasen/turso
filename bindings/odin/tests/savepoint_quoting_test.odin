@@ -20,7 +20,7 @@ quoting_setup :: proc(name: string) -> Test_DB {
 
 @(private="file")
 table_exists :: proc(conn: turso.Connection, name: string) -> bool {
-	n, _, _ := turso.db_scalar_i64(
+	n, _, _ := turso.conn_scalar_i64(
 		conn,
 		"SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name=?",
 		turso.bind_text(name),
@@ -36,7 +36,7 @@ test_savepoint_name_with_injection_payload :: proc() {
 	defer test_db_close(&t)
 
 	evil := `evil"; DROP TABLE marker; --`
-	e, ok := turso.db_with_savepoint(t.conn, evil, proc(c: turso.Connection) -> bool {
+	e, ok := turso.conn_with_savepoint(t.conn, evil, proc(c: turso.Connection) -> bool {
 		return true
 	})
 	expect_no_err(e, ok, "savepoint with injection-shaped name must succeed under proper escaping")
@@ -48,7 +48,7 @@ test_savepoint_name_with_embedded_double_quote :: proc() {
 	t := quoting_setup("savepoint_dquote")
 	defer test_db_close(&t)
 
-	e, ok := turso.db_with_savepoint(t.conn, `a"b`, proc(c: turso.Connection) -> bool {
+	e, ok := turso.conn_with_savepoint(t.conn, `a"b`, proc(c: turso.Connection) -> bool {
 		return true
 	})
 	expect_no_err(e, ok, `savepoint name a"b must be accepted (doubled-quote escape)`)
@@ -65,7 +65,7 @@ test_savepoint_name_with_nul_byte :: proc() {
 	name_with_nul := strings.concatenate(parts[:])
 	defer delete(name_with_nul)
 
-	e, ok := turso.db_savepoint(t.conn, name_with_nul)
+	e, ok := turso.conn_savepoint(t.conn, name_with_nul)
 	defer turso.error_destroy(&e)
 	expect_false(ok, "savepoint with NUL byte must fail with a typed error")
 	expect_eq(e.code, turso.Status_Code.MISUSE, "NUL byte triggers MISUSE")

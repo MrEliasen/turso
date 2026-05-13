@@ -15,11 +15,11 @@ main :: proc() {
 	conn, _, _ := turso.connect(db)
 	defer { _, _ = turso.conn_close(&conn) }
 
-	_, _, _ = turso.db_exec(conn, "CREATE TABLE points(x INTEGER, y INTEGER)")
+	_, _, _ = turso.conn_exec(conn, "CREATE TABLE points(x INTEGER, y INTEGER)")
 
 	pairs := [?][2]i64{{1, 10}, {2, 20}, {3, 30}}
 	for pair in pairs {
-		_, _, _ = turso.db_exec_args(
+		_, _, _ = turso.conn_exec_args(
 			conn,
 			"INSERT INTO points(x, y) VALUES (:x, :y)",
 			turso.bind_int(pair[0]),

@@ -45,6 +45,25 @@ open_or_create :: proc(
 		return Sync_Database{}, sync_misuse(op_name, "sync.Config.client_name is required"), false
 	}
 
+	// Validate every string that ends up as a C-string handed to either the
+	// core or sync engine. An embedded NUL would silently truncate the input;
+	// auth_token additionally must not contain CR or LF because it goes into
+	// an HTTP header value where CRLF would let a caller smuggle additional
+	// headers.
+	if e, ok := turso.must_be_nul_free(core.path,                              op_name, "Database_Config.path");                  !ok { return Sync_Database{}, e, false }
+	if e, ok := turso.must_be_nul_free(core.experimental_features,             op_name, "Database_Config.experimental_features"); !ok { return Sync_Database{}, e, false }
+	if e, ok := turso.must_be_nul_free(core.vfs,                               op_name, "Database_Config.vfs");                   !ok { return Sync_Database{}, e, false }
+	if e, ok := turso.must_be_nul_free(core.encryption_cipher,                 op_name, "Database_Config.encryption_cipher");     !ok { return Sync_Database{}, e, false }
+	if e, ok := turso.must_be_nul_free(core.encryption_hexkey,                 op_name, "Database_Config.encryption_hexkey");     !ok { return Sync_Database{}, e, false }
+	if e, ok := turso.must_be_nul_free(cfg.path,                               op_name, "sync.Config.path");                              !ok { return Sync_Database{}, e, false }
+	if e, ok := turso.must_be_nul_free(cfg.remote_url,                         op_name, "sync.Config.remote_url");                        !ok { return Sync_Database{}, e, false }
+	if e, ok := turso.must_be_nul_free(cfg.client_name,                        op_name, "sync.Config.client_name");                       !ok { return Sync_Database{}, e, false }
+	if e, ok := turso.must_be_nul_free(cfg.partial_bootstrap_strategy_query,   op_name, "sync.Config.partial_bootstrap_strategy_query");  !ok { return Sync_Database{}, e, false }
+	if e, ok := turso.must_be_nul_free(cfg.remote_encryption_key,              op_name, "sync.Config.remote_encryption_key");             !ok { return Sync_Database{}, e, false }
+	if e, ok := turso.must_be_nul_free(cfg.remote_encryption_cipher,           op_name, "sync.Config.remote_encryption_cipher");          !ok { return Sync_Database{}, e, false }
+	if e, ok := turso.must_be_header_safe(cfg.auth_token,                      op_name, "sync.Config.auth_token");                        !ok { return Sync_Database{}, e, false }
+	if e, ok := turso.must_be_header_safe(client.auth_token,                   op_name, "HTTP_Client.auth_token");                        !ok { return Sync_Database{}, e, false }
+
 	c_strings: [dynamic]cstring
 	defer {
 		for s in c_strings { delete(s) }
@@ -143,10 +162,13 @@ free_config :: proc(cfg: ^Config) {
 	if len(cfg.path)                             > 0 { delete(cfg.path);                             cfg.path = "" }
 	if len(cfg.remote_url)                       > 0 { delete(cfg.remote_url);                       cfg.remote_url = "" }
 	if len(cfg.client_name)                      > 0 { delete(cfg.client_name);                      cfg.client_name = "" }
-	if len(cfg.auth_token)                       > 0 { delete(cfg.auth_token);                       cfg.auth_token = "" }
 	if len(cfg.partial_bootstrap_strategy_query) > 0 { delete(cfg.partial_bootstrap_strategy_query); cfg.partial_bootstrap_strategy_query = "" }
-	if len(cfg.remote_encryption_key)            > 0 { delete(cfg.remote_encryption_key);            cfg.remote_encryption_key = "" }
 	if len(cfg.remote_encryption_cipher)         > 0 { delete(cfg.remote_encryption_cipher);         cfg.remote_encryption_cipher = "" }
+	// Sensitive material: zero the buffer before returning it to the allocator
+	// so a later allocation cannot read a stale credential. The remote_url and
+	// path fields above are not treated as sensitive.
+	if len(cfg.auth_token)            > 0 { turso.delete_zeroed_string(cfg.auth_token);            cfg.auth_token = "" }
+	if len(cfg.remote_encryption_key) > 0 { turso.delete_zeroed_string(cfg.remote_encryption_key); cfg.remote_encryption_key = "" }
 }
 
 // changes_close frees an unconsumed change set. After apply_changes is called

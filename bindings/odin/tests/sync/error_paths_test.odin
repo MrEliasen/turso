@@ -38,8 +38,8 @@ make_db_with_local_changes :: proc(dir: string, client: sync.HTTP_Client) -> syn
 
 	conn, ce, cok := sync.connect(db)
 	expect_no_err(ce, cok, "errpath: sync.connect")
-	_, _, _ = turso.db_exec(conn, "CREATE TABLE t(v TEXT)")
-	_, _, _ = turso.db_exec_args(conn, "INSERT INTO t(v) VALUES (?)", turso.bind_text("changes-to-push"))
+	_, _, _ = turso.conn_exec(conn, "CREATE TABLE t(v TEXT)")
+	_, _, _ = turso.conn_exec_args(conn, "INSERT INTO t(v) VALUES (?)", turso.bind_text("changes-to-push"))
 	turso.conn_close(&conn)
 
 	return db

@@ -17,7 +17,7 @@ test_async_io_basic_operations :: proc() {
 	exec_ok(conn, "CREATE TABLE t(v INTEGER)")
 	exec_ok(conn, "INSERT INTO t(v) VALUES (1), (2), (3)")
 
-	count, e3, ok3 := turso.db_scalar_i64(conn, "SELECT COUNT(*) FROM t")
+	count, e3, ok3 := turso.conn_scalar_i64(conn, "SELECT COUNT(*) FROM t")
 	expect_no_err(e3, ok3, "scalar count with async_io")
 	expect_eq(count, i64(3), "3 rows inserted with async_io")
 }
@@ -35,7 +35,7 @@ test_async_io_step_iteration :: proc() {
 
 	exec_ok(conn, "CREATE TABLE t(v INTEGER)")
 	for i in 1 ..= 5 {
-		_, _, _ = turso.db_exec_args(conn, "INSERT INTO t(v) VALUES (?)", turso.bind_int(i64(i)))
+		_, _, _ = turso.conn_exec_args(conn, "INSERT INTO t(v) VALUES (?)", turso.bind_int(i64(i)))
 	}
 
 	stmt := prep_ok(conn, "SELECT v FROM t ORDER BY v")

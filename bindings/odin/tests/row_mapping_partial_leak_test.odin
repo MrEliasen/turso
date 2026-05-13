@@ -23,7 +23,7 @@ test_stmt_scan_struct_partial_failure_leaks_earlier_text_field :: proc() {
 	t := test_db_open_memory()
 	defer test_db_close(&t)
 	exec_ok(t.conn, "CREATE TABLE t(a TEXT, b INTEGER)")
-	_, _, _ = turso.db_exec_args(t.conn, "INSERT INTO t(a, b) VALUES (?, ?)",
+	_, _, _ = turso.conn_exec_args(t.conn, "INSERT INTO t(a, b) VALUES (?, ?)",
 		turso.bind_text("payload-bytes-that-would-have-leaked"), turso.bind_int(42))
 
 	stmt := prep_ok(t.conn, "SELECT a, b FROM t")

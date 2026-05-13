@@ -16,7 +16,12 @@ Connection :: struct {
 }
 
 // Statement is a prepared statement. Always pair with finalize.
-// SQL is borrowed from the caller's allocation; not owned.
+// sql is borrowed from the caller's allocation when the Statement was returned
+// by `prepare` or `prepare_first`; in that case the caller must keep the SQL
+// string alive at least until any error returns are inspected. When the
+// Statement was returned by `prepare_cached`, sql aliases the cache's own
+// owned copy of the key, so it remains valid for as long as the entry is in
+// the cache. Either way, do not free `sql` directly.
 Statement :: struct {
 	handle: raw.Statement_Ptr,
 	db:     raw.Database_Ptr,
@@ -105,6 +110,22 @@ bind_int    :: proc(v: i64) -> Bind_Arg         { return Bind_Arg{kind = .Int,  
 bind_double :: proc(v: f64) -> Bind_Arg         { return Bind_Arg{kind = .Double, value = v} }
 bind_text   :: proc(v: string) -> Bind_Arg      { return Bind_Arg{kind = .Text,   value = v} }
 bind_blob   :: proc(v: []u8) -> Bind_Arg        { return Bind_Arg{kind = .Blob,   value = v} }
+
+// Convenience constructors for the smaller numeric kinds. SQLite stores all
+// integers as i64 and all floats as f64, so these widen at the call site and
+// share the existing bind_int / bind_double paths. bind_bool follows SQLite
+// convention: true -> 1, false -> 0.
+bind_bool :: proc(v: bool) -> Bind_Arg { return bind_int(v ? 1 : 0) }
+bind_i32  :: proc(v: i32)  -> Bind_Arg { return bind_int(i64(v)) }
+bind_i16  :: proc(v: i16)  -> Bind_Arg { return bind_int(i64(v)) }
+bind_i8   :: proc(v: i8)   -> Bind_Arg { return bind_int(i64(v)) }
+bind_u32  :: proc(v: u32)  -> Bind_Arg { return bind_int(i64(v)) }
+bind_u16  :: proc(v: u16)  -> Bind_Arg { return bind_int(i64(v)) }
+bind_u8   :: proc(v: u8)   -> Bind_Arg { return bind_int(i64(v)) }
+// bind_u64 reinterprets as i64. Values above i64.max wrap to negative; this
+// matches how SQLite stores unsigned integers in INTEGER columns.
+bind_u64  :: proc(v: u64)  -> Bind_Arg { return bind_int(transmute(i64)v) }
+bind_f32  :: proc(v: f32)  -> Bind_Arg { return bind_double(f64(v)) }
 
 db_is_open   :: proc(d: Database)   -> bool { return d.handle != nil }
 conn_is_open :: proc(c: Connection) -> bool { return c.handle != nil }

@@ -13,7 +13,7 @@ test_stmt_scan_struct_by_name :: proc() {
 	t := test_db_open_memory()
 	defer test_db_close(&t)
 	exec_ok(t.conn, "CREATE TABLE t(id INTEGER, name TEXT)")
-	_, _, _ = turso.db_exec_args(t.conn,
+	_, _, _ = turso.conn_exec_args(t.conn,
 		"INSERT INTO t(id, name) VALUES (?, ?)",
 		turso.bind_int(7), turso.bind_text("alice"),
 	)
@@ -40,7 +40,7 @@ test_stmt_scan_struct_tag_override :: proc() {
 	t := test_db_open_memory()
 	defer test_db_close(&t)
 	exec_ok(t.conn, "CREATE TABLE t(id INTEGER, name TEXT)")
-	_, _, _ = turso.db_exec_args(t.conn,
+	_, _, _ = turso.conn_exec_args(t.conn,
 		"INSERT INTO t(id, name) VALUES (?, ?)",
 		turso.bind_int(42), turso.bind_text("bob"),
 	)
@@ -68,7 +68,7 @@ test_stmt_scan_struct_missing_column_ignored :: proc() {
 	t := test_db_open_memory()
 	defer test_db_close(&t)
 	exec_ok(t.conn, "CREATE TABLE t(id INTEGER, name TEXT)")
-	_, _, _ = turso.db_exec_args(t.conn,
+	_, _, _ = turso.conn_exec_args(t.conn,
 		"INSERT INTO t(id, name) VALUES (?, ?)",
 		turso.bind_int(1), turso.bind_text("carol"),
 	)
@@ -90,7 +90,7 @@ test_stmt_scan_struct_extra_column_ignored :: proc() {
 	t := test_db_open_memory()
 	defer test_db_close(&t)
 	exec_ok(t.conn, "CREATE TABLE t(id INTEGER, name TEXT, extra INTEGER)")
-	_, _, _ = turso.db_exec_args(t.conn,
+	_, _, _ = turso.conn_exec_args(t.conn,
 		"INSERT INTO t(id, name, extra) VALUES (?, ?, ?)",
 		turso.bind_int(2), turso.bind_text("dave"), turso.bind_int(999),
 	)
@@ -163,46 +163,46 @@ test_stmt_scan_struct_not_a_struct_errors :: proc() {
 	expect_eq(e.code, turso.Status_Code.MISUSE, "MISUSE code for non-struct target")
 }
 
-test_db_query_one_struct :: proc() {
+test_conn_query_one_struct :: proc() {
 	t := test_db_open_memory()
 	defer test_db_close(&t)
 	exec_ok(t.conn, "CREATE TABLE t(id INTEGER, name TEXT)")
-	_, _, _ = turso.db_exec_args(t.conn,
+	_, _, _ = turso.conn_exec_args(t.conn,
 		"INSERT INTO t(id, name) VALUES (?, ?)",
 		turso.bind_int(11), turso.bind_text("eve"),
 	)
 
 	row: RM_User
-	e, ok := turso.db_query_one_struct(t.conn, "SELECT id, name FROM t", &row)
-	expect_no_err(e, ok, "db_query_one_struct")
+	e, ok := turso.conn_query_one_struct(t.conn, "SELECT id, name FROM t", &row)
+	expect_no_err(e, ok, "conn_query_one_struct")
 	defer delete(row.name)
 	expect_eq(row.id, i64(11), "id populated")
 	expect_eq(row.name, "eve", "name populated")
 }
 
-test_db_query_optional_struct_zero_rows :: proc() {
+test_conn_query_optional_struct_zero_rows :: proc() {
 	t := test_db_open_memory()
 	defer test_db_close(&t)
 	exec_ok(t.conn, "CREATE TABLE t(id INTEGER, name TEXT)")
 
 	row: RM_User
-	found, e, ok := turso.db_query_optional_struct(t.conn, "SELECT id, name FROM t", &row)
+	found, e, ok := turso.conn_query_optional_struct(t.conn, "SELECT id, name FROM t", &row)
 	expect_no_err(e, ok, "optional struct on empty table")
 	expect_false(found, "no rows → found=false")
 	expect_eq(row.id, i64(0), "struct unchanged")
 }
 
-test_db_query_optional_struct_one_row :: proc() {
+test_conn_query_optional_struct_one_row :: proc() {
 	t := test_db_open_memory()
 	defer test_db_close(&t)
 	exec_ok(t.conn, "CREATE TABLE t(id INTEGER, name TEXT)")
-	_, _, _ = turso.db_exec_args(t.conn,
+	_, _, _ = turso.conn_exec_args(t.conn,
 		"INSERT INTO t(id, name) VALUES (?, ?)",
 		turso.bind_int(33), turso.bind_text("frank"),
 	)
 
 	row: RM_User
-	found, e, ok := turso.db_query_optional_struct(t.conn, "SELECT id, name FROM t", &row)
+	found, e, ok := turso.conn_query_optional_struct(t.conn, "SELECT id, name FROM t", &row)
 	expect_no_err(e, ok, "optional struct on one-row table")
 	expect_true(found, "one row → found=true")
 	defer delete(row.name)
@@ -210,16 +210,16 @@ test_db_query_optional_struct_one_row :: proc() {
 	expect_eq(row.name, "frank", "name populated")
 }
 
-test_db_query_all_struct :: proc() {
+test_conn_query_all_struct :: proc() {
 	t := test_db_open_memory()
 	defer test_db_close(&t)
 	exec_ok(t.conn, "CREATE TABLE t(id INTEGER, name TEXT)")
-	_, _, _ = turso.db_exec_args(t.conn, "INSERT INTO t(id, name) VALUES (?, ?)", turso.bind_int(1), turso.bind_text("a"))
-	_, _, _ = turso.db_exec_args(t.conn, "INSERT INTO t(id, name) VALUES (?, ?)", turso.bind_int(2), turso.bind_text("b"))
-	_, _, _ = turso.db_exec_args(t.conn, "INSERT INTO t(id, name) VALUES (?, ?)", turso.bind_int(3), turso.bind_text("c"))
+	_, _, _ = turso.conn_exec_args(t.conn, "INSERT INTO t(id, name) VALUES (?, ?)", turso.bind_int(1), turso.bind_text("a"))
+	_, _, _ = turso.conn_exec_args(t.conn, "INSERT INTO t(id, name) VALUES (?, ?)", turso.bind_int(2), turso.bind_text("b"))
+	_, _, _ = turso.conn_exec_args(t.conn, "INSERT INTO t(id, name) VALUES (?, ?)", turso.bind_int(3), turso.bind_text("c"))
 
-	rows, e, ok := turso.db_query_all_struct(RM_User, t.conn, "SELECT id, name FROM t ORDER BY id")
-	expect_no_err(e, ok, "db_query_all_struct")
+	rows, e, ok := turso.conn_query_all_struct(RM_User, t.conn, "SELECT id, name FROM t ORDER BY id")
+	expect_no_err(e, ok, "conn_query_all_struct")
 	defer {
 		for &r in rows { delete(r.name) }
 		delete(rows)

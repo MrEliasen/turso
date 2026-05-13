@@ -38,14 +38,14 @@ test_two_connections_share_state :: proc() {
 
 	// Alternating inserts from both connections.
 	for i in 0 ..< 10 {
-		_, ie, iok := turso.db_exec_args(
+		_, ie, iok := turso.conn_exec_args(
 			conn1,
 			"INSERT INTO t(src, v) VALUES (?, ?)",
 			turso.bind_int(1), turso.bind_text(fmt.tprintf("c1-%d", i)),
 		)
 		expect_no_err(ie, iok, "conn1 insert")
 
-		_, je, jok := turso.db_exec_args(
+		_, je, jok := turso.conn_exec_args(
 			conn2,
 			"INSERT INTO t(src, v) VALUES (?, ?)",
 			turso.bind_int(2), turso.bind_text(fmt.tprintf("c2-%d", i)),
@@ -54,17 +54,17 @@ test_two_connections_share_state :: proc() {
 	}
 
 	// Both connections see all 20 rows.
-	count1, ce1, cok1 := turso.db_scalar_i64(conn1, "SELECT COUNT(*) FROM t")
+	count1, ce1, cok1 := turso.conn_scalar_i64(conn1, "SELECT COUNT(*) FROM t")
 	expect_no_err(ce1, cok1, "count via conn1")
 	expect_eq(count1, i64(20), "conn1 row count after cross-connection inserts")
 
-	count2, ce2, cok2 := turso.db_scalar_i64(conn2, "SELECT COUNT(*) FROM t")
+	count2, ce2, cok2 := turso.conn_scalar_i64(conn2, "SELECT COUNT(*) FROM t")
 	expect_no_err(ce2, cok2, "count via conn2")
 	expect_eq(count2, i64(20), "conn2 row count after cross-connection inserts")
 
 	// Cross-source verification: conn1 sees rows inserted by conn2 and vice versa.
-	c1_via_c2, _, _ := turso.db_scalar_i64(conn2, "SELECT COUNT(*) FROM t WHERE src = 1")
+	c1_via_c2, _, _ := turso.conn_scalar_i64(conn2, "SELECT COUNT(*) FROM t WHERE src = 1")
 	expect_eq(c1_via_c2, i64(10), "conn2 must see conn1's rows")
-	c2_via_c1, _, _ := turso.db_scalar_i64(conn1, "SELECT COUNT(*) FROM t WHERE src = 2")
+	c2_via_c1, _, _ := turso.conn_scalar_i64(conn1, "SELECT COUNT(*) FROM t WHERE src = 2")
 	expect_eq(c2_via_c1, i64(10), "conn1 must see conn2's rows")
 }

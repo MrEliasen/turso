@@ -83,7 +83,7 @@ test_db_close :: proc(t: ^Test_DB) {
 }
 
 exec_ok :: proc(conn: turso.Connection, sql: string, loc := #caller_location) -> u64 {
-	rows, err, ok := turso.db_exec(conn, sql)
+	rows, err, ok := turso.conn_exec(conn, sql)
 	expect_no_err(err, ok, fmt.tprintf("exec %q", sql), loc)
 	return rows
 }

@@ -29,6 +29,14 @@ import "core:strings"
 import curl "vendor:curl"
 import sync "../"
 
+// CONNECT_TIMEOUT_SECONDS bounds the time spent establishing the TCP+TLS handshake
+// to the sync endpoint. REQUEST_TIMEOUT_SECONDS bounds the total wall-clock time
+// the easy handle spends inside curl_easy_perform. Both are intentionally
+// conservative; if the engine ever needs more elasticity, expose them through
+// HTTP_Client or accept a configurable client.
+CONNECT_TIMEOUT_SECONDS :: 10
+REQUEST_TIMEOUT_SECONDS :: 60
+
 @(private="file")
 Curl_Write_State :: struct {
 	buf:       ^[dynamic]u8,
@@ -72,8 +80,23 @@ roundtrip :: proc(user_data: rawptr, req: sync.HTTP_Request, allocator: mem.Allo
 	if rc := curl.easy_setopt(handle, curl.option.NOSIGNAL, c.long(1)); rc != .E_OK {
 		return {}, curl_err("CURLOPT_NOSIGNAL", rc, allocator), false
 	}
-	if rc := curl.easy_setopt(handle, curl.option.FOLLOWLOCATION, c.long(1)); rc != .E_OK {
+	// Auto-follow is disabled. The sync dispatcher attaches Authorization: Bearer <token>
+	// via CURLOPT_HTTPHEADER and libcurl re-sends custom header lists across cross-host
+	// redirects, which would leak the credential to whatever the redirect points at.
+	// Sync endpoints are not expected to 3xx; if that ever changes the engine should
+	// surface the new URL explicitly so the caller (and this client) can validate it.
+	if rc := curl.easy_setopt(handle, curl.option.FOLLOWLOCATION, c.long(0)); rc != .E_OK {
 		return {}, curl_err("CURLOPT_FOLLOWLOCATION", rc, allocator), false
+	}
+	// Defence in depth: also set hard wall-clock and connect deadlines so a hung
+	// server cannot block sync.push / sync.pull indefinitely from inside
+	// curl_easy_perform. Values are conservative defaults; callers needing finer
+	// control can supply their own HTTP_Do via sync.HTTP_Client.roundtrip.
+	if rc := curl.easy_setopt(handle, curl.option.CONNECTTIMEOUT, c.long(CONNECT_TIMEOUT_SECONDS)); rc != .E_OK {
+		return {}, curl_err("CURLOPT_CONNECTTIMEOUT", rc, allocator), false
+	}
+	if rc := curl.easy_setopt(handle, curl.option.TIMEOUT, c.long(REQUEST_TIMEOUT_SECONDS)); rc != .E_OK {
+		return {}, curl_err("CURLOPT_TIMEOUT", rc, allocator), false
 	}
 
 	method_upper := strings.to_upper(req.method, allocator)

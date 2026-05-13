@@ -6,9 +6,17 @@ import raw "raw"
 // prepare compiles a single SQL statement on the connection.
 // If sql contains multiple statements, only the first is compiled and remaining
 // text is ignored - use prepare_first to iterate.
+//
+// An embedded NUL byte in sql is rejected with a typed MISUSE error rather
+// than silently truncating the query at the first NUL when it is handed to
+// the C ABI.
 prepare :: proc(conn: Connection, sql: string) -> (Statement, Error, bool) {
 	if conn.handle == nil {
 		return Statement{}, make_error(.MISUSE, "prepare", "connection is not open", sql), false
+	}
+	if e, ok := must_be_nul_free(sql, "prepare", "sql"); !ok {
+		e.sql = strings.clone(sql)
+		return Statement{}, e, false
 	}
 	c_sql := strings.clone_to_cstring(sql, context.allocator)
 	defer delete(c_sql)
@@ -29,6 +37,10 @@ prepare :: proc(conn: Connection, sql: string) -> (Statement, Error, bool) {
 prepare_first :: proc(conn: Connection, sql: string) -> (stmt: Statement, tail: int, err: Error, ok: bool) {
 	if conn.handle == nil {
 		return Statement{}, 0, make_error(.MISUSE, "prepare_first", "connection is not open", sql), false
+	}
+	if e, vok := must_be_nul_free(sql, "prepare_first", "sql"); !vok {
+		e.sql = strings.clone(sql)
+		return Statement{}, 0, e, false
 	}
 	c_sql := strings.clone_to_cstring(sql, context.allocator)
 	defer delete(c_sql)

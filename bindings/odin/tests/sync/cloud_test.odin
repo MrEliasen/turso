@@ -60,10 +60,10 @@ cloud_run_phase_a :: proc(url: string, token: string) {
 	defer turso.conn_close(&conn)
 
 	// Drop any leftover state from a prior failed run, then create the table.
-	_, _, _ = turso.db_exec(conn, "DROP TABLE IF EXISTS odin_e2e")
-	_, dde, ddok := turso.db_exec(conn, "CREATE TABLE odin_e2e(id INTEGER PRIMARY KEY, v TEXT)")
+	_, _, _ = turso.conn_exec(conn, "DROP TABLE IF EXISTS odin_e2e")
+	_, dde, ddok := turso.conn_exec(conn, "CREATE TABLE odin_e2e(id INTEGER PRIMARY KEY, v TEXT)")
 	expect_no_err(dde, ddok, "phase A: CREATE TABLE")
-	_, ie, iok := turso.db_exec_args(conn, "INSERT INTO odin_e2e(v) VALUES (?)", turso.bind_text("hello"))
+	_, ie, iok := turso.conn_exec_args(conn, "INSERT INTO odin_e2e(v) VALUES (?)", turso.bind_text("hello"))
 	expect_no_err(ie, iok, "phase A: INSERT row")
 
 	pe, pok := sync.push(db)
@@ -138,6 +138,6 @@ cloud_run_cleanup :: proc(url: string, token: string) {
 	expect_no_err(ce, cok, "cleanup: sync.connect")
 	defer turso.conn_close(&conn)
 
-	_, _, _ = turso.db_exec(conn, "DROP TABLE IF EXISTS odin_e2e")
+	_, _, _ = turso.conn_exec(conn, "DROP TABLE IF EXISTS odin_e2e")
 	_, _ = sync.push(db)
 }

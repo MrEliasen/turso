@@ -43,6 +43,13 @@ ALL_TESTS := [?]Test_Entry{
 
 	// New audit tests
 	{"test_http_client_auth_token_is_forwarded", test_http_client_auth_token_is_forwarded},
+
+	// Audit tier 2: auth_token must reject bytes that would let a caller
+	// smuggle additional headers or split the HTTP request.
+	{"test_sync_config_auth_token_rejects_crlf",         test_sync_config_auth_token_rejects_crlf},
+	{"test_sync_config_auth_token_rejects_nul",          test_sync_config_auth_token_rejects_nul},
+	{"test_sync_client_auth_token_rejects_crlf",         test_sync_client_auth_token_rejects_crlf},
+	{"test_curlhttp_does_not_auto_follow_redirects",     test_curlhttp_does_not_auto_follow_redirects},
 }
 
 main :: proc() {

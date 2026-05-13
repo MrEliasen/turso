@@ -117,6 +117,13 @@ dispatch_http :: proc(item: raw.Io_Item_Ptr, client: HTTP_Client, base_url: stri
 	// out of dispatch_http. alignment=64 lets the runtime map allocator (used
 	// by some HTTP_Do implementations, e.g. test stubs that parse JSON) hand
 	// out cache-line aligned buffers without panicking.
+	//
+	// Arena lifetime invariant: every string and header value built below
+	// MUST be fully consumed by `client.roundtrip` before this proc returns.
+	// In particular, do not store any header value, the bearer header line,
+	// or the request body view in a place that outlives dispatch_http. The
+	// engine reads them synchronously through push_buffer / push_response_body;
+	// any future streaming change must re-evaluate this invariant.
 	scratch_pool: mem.Dynamic_Arena
 	mem.dynamic_arena_init(&scratch_pool, block_size = 128 * 1024, alignment = 64)
 	defer mem.dynamic_arena_destroy(&scratch_pool)

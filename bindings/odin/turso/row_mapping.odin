@@ -45,14 +45,20 @@ stmt_scan_struct :: proc(stmt: Statement, out: ^$T, allocator := context.allocat
 	n := int(column_count(stmt))
 
 	// Resolve column → field mapping once, validating types in the same pass.
-	// Stored on the stack; no heap allocation. Max columns is bounded by SQL
-	// engine limits, but keep a sane cap.
-	MAX_COLS :: 256
-	if n > MAX_COLS {
-		msg := fmt.tprintf("too many columns for stmt_scan_struct (got %d, max %d)", n, MAX_COLS)
-		return make_error(.MISUSE, "stmt_scan_struct", msg), false
+	// For the common case (n <= STACK_COLS) the plans live on the stack so no
+	// heap allocation happens on the happy path. Wider rows promote to a
+	// temp-allocator slice so the binding does not artificially cap queries
+	// below SQLITE_MAX_COLUMN (default 2000).
+	STACK_COLS :: 64
+	stack_plans: [STACK_COLS]Scan_Plan
+	heap_plans:  []Scan_Plan
+	plans:       []Scan_Plan
+	if n <= STACK_COLS {
+		plans = stack_plans[:n]
+	} else {
+		heap_plans = make([]Scan_Plan, n, context.temp_allocator)
+		plans = heap_plans
 	}
-	plans: [MAX_COLS]Scan_Plan
 	plan_count := 0
 
 	for col_idx in 0 ..< n {
@@ -98,9 +104,9 @@ Scan_Plan :: struct {
 	kind:       Value_Kind,
 }
 
-// db_query_one_struct prepares + binds + steps `sql`, expects exactly one
+// conn_query_one_struct prepares + binds + steps `sql`, expects exactly one
 // row, and scans it into `out`. Returns an error for zero or two+ rows.
-db_query_one_struct :: proc(conn: Connection, sql: string, out: ^$T, args: ..Bind_Arg) -> (Error, bool) {
+conn_query_one_struct :: proc(conn: Connection, sql: string, out: ^$T, args: ..Bind_Arg) -> (Error, bool) {
 	stmt, e1, ok1 := prepare(conn, sql)
 	if !ok1 { return e1, false }
 	defer { _, _ = finalize(&stmt) }
@@ -112,21 +118,21 @@ db_query_one_struct :: proc(conn: Connection, sql: string, out: ^$T, args: ..Bin
 	sr, e3, ok3 := step(stmt)
 	if !ok3 { return e3, false }
 	if sr != .Row {
-		return make_error(.ERROR, "db_query_one_struct", "expected exactly one row, got zero", sql), false
+		return make_error(.ERROR, "conn_query_one_struct", "expected exactly one row, got zero", sql), false
 	}
 
 	if se, sok := stmt_scan_struct(stmt, out); !sok { return se, false }
 
 	sr2, _, _ := step(stmt)
 	if sr2 == .Row {
-		return make_error(.ERROR, "db_query_one_struct", "expected exactly one row, got multiple", sql), false
+		return make_error(.ERROR, "conn_query_one_struct", "expected exactly one row, got multiple", sql), false
 	}
 	return error_none(), true
 }
 
-// db_query_optional_struct is like db_query_one_struct but tolerates zero
+// conn_query_optional_struct is like conn_query_one_struct but tolerates zero
 // rows: `found=false, ok=true` on no match. Two+ rows is still an error.
-db_query_optional_struct :: proc(conn: Connection, sql: string, out: ^$T, args: ..Bind_Arg) ->
+conn_query_optional_struct :: proc(conn: Connection, sql: string, out: ^$T, args: ..Bind_Arg) ->
 	(found: bool, err: Error, ok: bool) {
 	stmt, e1, ok1 := prepare(conn, sql)
 	if !ok1 { return false, e1, false }
@@ -144,15 +150,15 @@ db_query_optional_struct :: proc(conn: Connection, sql: string, out: ^$T, args: 
 
 	sr2, _, _ := step(stmt)
 	if sr2 == .Row {
-		return false, make_error(.ERROR, "db_query_optional_struct", "expected at most one row, got multiple", sql), false
+		return false, make_error(.ERROR, "conn_query_optional_struct", "expected at most one row, got multiple", sql), false
 	}
 	return true, error_none(), true
 }
 
-// db_query_all_struct runs `sql` and scans every row into a caller-owned
+// conn_query_all_struct runs `sql` and scans every row into a caller-owned
 // []T. T is passed explicitly because there's no input value to deduce
-// from; usage: `rows, e, ok := turso.db_query_all_struct(User_Row, conn, sql, bind_int(5))`.
-db_query_all_struct :: proc($T: typeid, conn: Connection, sql: string, args: ..Bind_Arg) ->
+// from; usage: `rows, e, ok := turso.conn_query_all_struct(User_Row, conn, sql, bind_int(5))`.
+conn_query_all_struct :: proc($T: typeid, conn: Connection, sql: string, args: ..Bind_Arg) ->
 	(rows: []T, err: Error, ok: bool) {
 	stmt, e1, ok1 := prepare(conn, sql)
 	if !ok1 { return nil, e1, false }

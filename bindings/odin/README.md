@@ -10,13 +10,13 @@ Shipped:
 - All five SQL value kinds (INTEGER, REAL, TEXT, BLOB, NULL)
 - Column metadata (name, declared type)
 - Multi-statement parsing via `prepare_first`
-- Convenience helpers: `db_exec`, `db_exec_args`, `db_scalar_i64`
+- Convenience helpers: `conn_exec`, `conn_exec_args`, `conn_scalar_i64`
 - Encryption (`encryption_cipher` + `encryption_hexkey` in `Database_Config`, requires `experimental_features = "encryption"`)
 - Tracing logger callback (`setup(Setup_Options{log_level, logger})`)
 - Async I/O (`Database_Config.async_io = true`) with transparent `step`/`execute`/`finalize` + explicit `step_once`/`run_io` for event-loop integration
 - Statement cache (`cache_init`, `prepare_cached`, `cache_clear`, `cache_destroy`)
-- Transaction helpers (`db_with_transaction`, `db_with_savepoint`, plus `db_begin`/`db_commit`/`db_rollback` and savepoint primitives)
-- Reflection-based row-to-struct mapping (`stmt_scan_struct`, `db_query_one_struct`, `db_query_optional_struct`, `db_query_all_struct`)
+- Transaction helpers (`conn_with_transaction`, `conn_with_savepoint`, plus `conn_begin`/`conn_commit`/`conn_rollback` and savepoint primitives)
+- Reflection-based row-to-struct mapping (`stmt_scan_struct`, `conn_query_one_struct`, `conn_query_optional_struct`, `conn_query_all_struct`)
 - Sync engine wrappers (push/pull/checkpoint/stats against Turso Cloud) at `turso/sync/`. Caller supplies an HTTP roundtrip via `HTTP_Client.roundtrip`, OR imports the opt-in libcurl client at `turso/sync/curlhttp/`. See "Sync engine" below.
 
 CI: see [`.github/workflows/odin.yml`](../../.github/workflows/odin.yml). Linux + macOS on Blacksmith runners, builds the Rust dylibs then runs `make check` / `make test` / `make sync-test`. Cloud E2E auto-runs when `TURSO_TEST_URL` + `TURSO_TEST_TOKEN` repository secrets are set; otherwise the suite still passes (the cloud test silently skips).
@@ -43,7 +43,7 @@ bindings/odin/
 │   ├── column.odin         column metadata + row value accessors
 │   ├── connection.odin     database_open/close/connect
 │   ├── errors.odin         error type + string formatting
-│   ├── exec.odin           db_exec, db_exec_args, db_scalar_i64
+│   ├── exec.odin           conn_exec, conn_exec_args, conn_scalar_i64
 │   ├── setup.odin          global setup + tracing logger
 │   ├── statement.odin      prepare/step/execute/finalize + async step_once/run_io
 │   ├── types.odin          Database, Connection, Statement, Bind_Arg, Log_Event
@@ -119,8 +119,8 @@ main :: proc() {
     conn, _, _ := turso.connect(db)
     defer { _, _ = turso.conn_close(&conn) }
 
-    _, _, _ = turso.db_exec(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT)")
-    _, _, _ = turso.db_exec_args(conn,
+    _, _, _ = turso.conn_exec(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT)")
+    _, _, _ = turso.conn_exec_args(conn,
         "INSERT INTO t(name) VALUES (?)",
         turso.bind_text("alice"),
     )

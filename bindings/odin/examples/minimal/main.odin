@@ -24,7 +24,7 @@ main :: proc() {
 	}
 	defer { _, _ = turso.conn_close(&conn) }
 
-	_, e1, ok_ddl := turso.db_exec(conn, "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT)")
+	_, e1, ok_ddl := turso.conn_exec(conn, "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT)")
 	if !ok_ddl {
 		s := turso.error_string(e1); defer delete(s)
 		fmt.eprintln(s)
@@ -33,7 +33,7 @@ main :: proc() {
 
 	names := [?]string{"alice", "bob"}
 	for name in names {
-		_, e, ok_ins := turso.db_exec_args(conn, "INSERT INTO users(name) VALUES (?)", turso.bind_text(name))
+		_, e, ok_ins := turso.conn_exec_args(conn, "INSERT INTO users(name) VALUES (?)", turso.bind_text(name))
 		if !ok_ins {
 			s := turso.error_string(e); defer delete(s)
 			fmt.eprintln(s)
