@@ -44,7 +44,7 @@ internal_do_full_write :: proc(item: raw.Io_Item_Ptr) -> (poisoned: bool) {
 	path := slice_to_string(req.path)
 	content := slice_to_bytes(req.content)
 
-	if dir := filepath.dir(path, context.temp_allocator); dir != "" && dir != "." {
+	if dir := filepath.dir(path); dir != "" && dir != "." {
 		os.make_directory(dir)  // best-effort; if it exists the engine call still works
 	}
 

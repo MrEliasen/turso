@@ -145,8 +145,42 @@ dispatch_http :: proc(item: raw.Io_Item_Ptr, client: HTTP_Client, base_url: stri
 	}
 
 	raw.turso_sync_database_io_status(item, resp.status)
-	if len(resp.body) > 0 {
-		buf := bytes_to_slice_ref(resp.body)
+	push_response_body(item, resp.body)
+}
+
+// HTTP_PUSH_CHUNK_SIZE caps the byte count handed to a single
+// turso_sync_database_io_push_buffer call. Each call clones the slice into a
+// Rust-side Vec<u8>, so a 200MB unsharded bootstrap would otherwise force a
+// single 200MB allocation. 64KB matches the engine's internal chunking for
+// pull-bytes shards.
+HTTP_PUSH_CHUNK_SIZE :: 64 * 1024
+
+// http_response_chunks slices body into pieces of at most chunk_size bytes,
+// in order. Returns the body as a single slice when chunk_size <= 0. Exposed
+// (not @private) so tests can verify the chunking math; the iteration in
+// push_response_body is otherwise a trivial wrapper around it.
+http_response_chunks :: proc(body: []u8, chunk_size: int, allocator := context.temp_allocator) -> [][]u8 {
+	if len(body) == 0 { return nil }
+	if chunk_size <= 0 {
+		out := make([][]u8, 1, allocator)
+		out[0] = body
+		return out
+	}
+	n := (len(body) + chunk_size - 1) / chunk_size
+	out := make([][]u8, n, allocator)
+	for i in 0 ..< n {
+		start := i * chunk_size
+		end := start + chunk_size
+		if end > len(body) { end = len(body) }
+		out[i] = body[start:end]
+	}
+	return out
+}
+
+@(private)
+push_response_body :: proc(item: raw.Io_Item_Ptr, body: []u8, chunk_size: int = HTTP_PUSH_CHUNK_SIZE) {
+	for chunk in http_response_chunks(body, chunk_size) {
+		buf := bytes_to_slice_ref(chunk)
 		raw.turso_sync_database_io_push_buffer(item, &buf)
 	}
 }

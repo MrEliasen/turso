@@ -161,16 +161,80 @@ batch_step_count :: proc(req_obj: json.Object) -> int {
 // (database_sync_operations.rs:1798); on empty remaining buffer the streaming
 // loop returns None and the operation completes.
 pull_updates_empty_handler :: proc(req: sync.HTTP_Request, allocator: mem.Allocator) -> (status: i32, body: []u8, ok: bool) {
-	inner: [dynamic]u8
-	inner.allocator = allocator
-	write_string_field(&inner, 1, "r0")
-	write_submessage_field(&inner, 3, []u8{})
+	return 200, encode_pull_updates_response("r0", 0, nil, allocator), true
+}
 
+// Stub_Page_Data is one PageData entry for the pull-updates protobuf stream.
+// page_id matches PageData.page_id (the engine adds 1 to get the SQLite page
+// number, see database_sync_operations.rs:`frame_info.page_no = page_id + 1`).
+Stub_Page_Data :: struct {
+	page_id:      u64,
+	encoded_page: []u8,
+}
+
+// encode_pull_updates_response builds a length-delimited protobuf payload
+// matching what the engine consumes from /pull-updates: one
+// PullUpdatesRespProtoBody header followed by N PageData messages, each
+// prefixed with its varint length.
+//
+// db_size is in PAGES (not bytes). When non-zero, the engine treats the last
+// page as the final db size; pass 1 for a single-page snapshot, etc.
+encode_pull_updates_response :: proc(revision: string, db_size: u64, pages: []Stub_Page_Data, allocator: mem.Allocator) -> []u8 {
 	out: [dynamic]u8
 	out.allocator = allocator
-	write_varint(&out, u64(len(inner)))
-	for b in inner { append(&out, b) }
-	return 200, out[:], true
+
+	header: [dynamic]u8
+	header.allocator = allocator
+	write_string_field(&header, 1, revision)
+	if db_size != 0 {
+		write_uint64_field(&header, 2, db_size)
+	}
+	write_submessage_field(&header, 3, []u8{}) // raw_encoding (signals "use raw")
+	write_varint(&out, u64(len(header)))
+	for b in header { append(&out, b) }
+
+	for p in pages {
+		page_msg: [dynamic]u8
+		page_msg.allocator = allocator
+		write_uint64_field(&page_msg, 1, p.page_id)
+		write_bytes_field(&page_msg, 2, p.encoded_page)
+		write_varint(&out, u64(len(page_msg)))
+		for b in page_msg { append(&out, b) }
+	}
+	return out[:]
+}
+
+@(private)
+write_uint64_field :: proc(buf: ^[dynamic]u8, field: u32, v: u64) {
+	if v == 0 { return } // proto3 default
+	write_tag(buf, field, 0)
+	write_varint(buf, v)
+}
+
+@(private)
+write_bytes_field :: proc(buf: ^[dynamic]u8, field: u32, b: []u8) {
+	write_tag(buf, field, 2)
+	write_varint(buf, u64(len(b)))
+	for x in b { append(buf, x) }
+}
+
+@(private)
+pull_updates_with_pages_response: []u8
+
+// pull_updates_with_pages_handler returns the bytes previously installed via
+// set_pull_updates_with_pages. The closure-free shape is required because
+// Stub_Handler does not carry user_data; tests serialize through this global,
+// which is fine because sync tests run single-threaded.
+pull_updates_with_pages_handler :: proc(req: sync.HTTP_Request, allocator: mem.Allocator) -> (status: i32, body: []u8, ok: bool) {
+	return 200, pull_updates_with_pages_response, true
+}
+
+set_pull_updates_with_pages :: proc(body: []u8) {
+	pull_updates_with_pages_response = body
+}
+
+clear_pull_updates_with_pages :: proc() {
+	pull_updates_with_pages_response = nil
 }
 
 @(private)

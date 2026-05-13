@@ -15,12 +15,12 @@ Shipped:
 - Tracing logger callback (`setup(Setup_Options{log_level, logger})`)
 - Async I/O (`Database_Config.async_io = true`) with transparent `step`/`execute`/`finalize` + explicit `step_once`/`run_io` for event-loop integration
 - Statement cache (`cache_init`, `prepare_cached`, `cache_clear`, `cache_destroy`)
-- Sync engine wrappers (push/pull/checkpoint/stats against Turso Cloud) at `turso/sync/`. Caller supplies an HTTP roundtrip via `HTTP_Client.roundtrip`. See "Sync engine" below.
+- Transaction helpers (`db_with_transaction`, `db_with_savepoint`, plus `db_begin`/`db_commit`/`db_rollback` and savepoint primitives)
+- Reflection-based row-to-struct mapping (`stmt_scan_struct`, `db_query_one_struct`, `db_query_optional_struct`, `db_query_all_struct`)
+- Sync engine wrappers (push/pull/checkpoint/stats against Turso Cloud) at `turso/sync/`. Caller supplies an HTTP roundtrip via `HTTP_Client.roundtrip`, OR imports the opt-in libcurl client at `turso/sync/curlhttp/`. See "Sync engine" below.
 
 Deferred:
-- Reflection-based row-to-struct mapping
-- Transaction helper (`db_with_transaction` block-style)
-- Protocol-aware HTTP stub for offline push/pull/checkpoint testing (current sync tests cover linking, lifecycle, connect+query, and stats — push/pull/checkpoint need a real or mock cloud endpoint).
+- Bootstrap-pull protobuf stub that emits valid SQLite page bytes end-to-end. The encoder and an installable stub handler are in place (`encode_pull_updates_response`, `pull_updates_with_pages_handler`); the engine-driven coverage that captures real page bytes from a freshly-created local DB is the remaining piece.
 
 ## Layout
 
@@ -30,13 +30,16 @@ bindings/odin/
 │   ├── raw/                hand-written FFI declarations matching sdk-kit/turso.h
 │   ├── sync/               sync engine subpackage (push/pull/checkpoint/stats)
 │   │   ├── raw/            FFI for libturso_sync_sdk_kit (29 procs from turso_sync.h)
+│   │   ├── curlhttp/       opt-in libcurl HTTP client (vendor:curl)
 │   │   ├── types.odin      Sync_Database, Config, Stats, Sync_Changes
 │   │   ├── http.odin       HTTP_Client + HTTP_Request/HTTP_Response types
 │   │   ├── file_io.odin    default atomic-read / atomic-write IO handlers
-│   │   ├── io_loop.odin    drive_op_until_done loop + IO dispatch
+│   │   ├── io_loop.odin    drive_op_until_done loop + IO dispatch (chunked push)
 │   │   ├── database.odin   sync.database_open/create/close
 │   │   └── operations.odin sync.connect/push/pull/checkpoint/stats
 │   ├── cache.odin          statement cache
+│   ├── row_mapping.odin    reflection-based row-to-struct mapping
+│   ├── transaction.odin    block-scoped transaction + savepoint helpers
 │   ├── bind.odin           positional + named bind
 │   ├── column.odin         column metadata + row value accessors
 │   ├── connection.odin     database_open/close/connect
@@ -46,8 +49,8 @@ bindings/odin/
 │   ├── statement.odin      prepare/step/execute/finalize + async step_once/run_io
 │   ├── types.odin          Database, Connection, Statement, Bind_Arg, Log_Event
 │   └── version.odin        version()
-├── tests/                  local-DB test runner (39 tests)
-│   └── sync/               sync test binary (8 tests; built via make sync-test)
+├── tests/                  local-DB test runner (60 tests)
+│   └── sync/               sync test binary (30 tests; built via make sync-test)
 ├── examples/               minimal + named_params runnable examples
 ├── Makefile                build + check + test targets
 └── SYNC_HANDOFF.md         legacy sync engine handoff (now landed; see Sync engine below)
@@ -69,8 +72,8 @@ Produces `target/debug/libturso_sdk_kit.{dylib,so,dll}`.
 ```sh
 cd bindings/odin
 make check       # static check (no link)
-make test        # local-DB test suite (39 tests)
-make sync-test   # sync engine test suite (8 tests, builds libturso_sync_sdk_kit)
+make test        # local-DB test suite (60 tests)
+make sync-test   # sync engine test suite (30 tests, builds libturso_sync_sdk_kit; cloud E2E gated by TURSO_TEST_URL / TURSO_TEST_TOKEN)
 make example     # runs examples/minimal
 make examples    # runs every example
 ```
@@ -162,31 +165,26 @@ Every fallible proc returns `(Value, Error, bool)`. Inspect `ok` first; on failu
 
 The sync engine subpackage at `turso/sync/` wraps `sync/sdk-kit/turso_sync.h` (the cloud sync C ABI). It links against `libturso_sync_sdk_kit` which is a self-contained superset of `libturso_sdk_kit` — the sync test binary therefore builds with `-define:TURSO_USE_SYNC_DYLIB=true` so both `turso/raw` and `turso/sync/raw` resolve to the same dylib. This keeps every `turso_*` pointer on a single memory namespace; linking both dylibs in one binary splits `turso_core` state and crashes on cross-lib pointer use.
 
-The engine pulls a request/response loop — the caller satisfies the HTTP and atomic-file IO requests the engine emits, then resumes the operation. HTTP is left to the caller (the engine deliberately does not bundle TLS); pass an `HTTP_Client` whose `.roundtrip` performs one synchronous HTTP round-trip:
+The engine pulls a request/response loop — the caller satisfies the HTTP and atomic-file IO requests the engine emits, then resumes the operation. HTTP is left to the caller's choice; either import the bundled libcurl client at `turso/sync/curlhttp/` for a zero-setup default, or pass a custom `HTTP_Client.roundtrip` for full control (the engine deliberately does not bundle TLS itself).
+
+### Built-in libcurl client (recommended)
 
 ```odin
 package main
 
 import "core:fmt"
-import "core:mem"
 import turso "turso"
 import sync "turso/sync"
-
-http_do :: proc(user_data: rawptr, req: sync.HTTP_Request, allocator: mem.Allocator) ->
-    (sync.HTTP_Response, string, bool) {
-    // Plug in libcurl, core:net, your favorite Odin HTTP lib, etc.
-    // Return ok=false + a message to mark the IO item poisoned.
-    return sync.HTTP_Response{status = 200}, "", true
-}
+import curlhttp "turso/sync/curlhttp"
 
 main :: proc() {
     cfg := sync.Config{
         path        = "/var/data/synced.db",
-        remote_url  = "https://my-db.turso.io",
+        remote_url  = "libsql://my-db.turso.io",
         client_name = "my-app",
         auth_token  = "<jwt-or-platform-token>",
     }
-    client := sync.HTTP_Client{roundtrip = http_do, auth_token = cfg.auth_token}
+    client := curlhttp.client(cfg.auth_token)
 
     db, err, ok := sync.database_create(turso.Database_Config{path = cfg.path}, cfg, client)
     if !ok { fmt.eprintln(turso.error_string(err)); return }
@@ -195,13 +193,29 @@ main :: proc() {
     conn, _, _ := sync.connect(db)
     defer { _, _ = turso.conn_close(&conn) }
 
-    // ... use conn with turso.prepare / step / finalize as usual.
-
     _, _          = sync.push(db)         // upload local CDC operations
     applied, _, _ := sync.pull(db)        // download + apply remote changes
     _, _          = sync.checkpoint(db)   // truncate local WAL once both sides are caught up
     _ = applied
 }
+```
+
+`turso/sync/curlhttp/` is a separate Odin package — importing it pulls the `vendor:curl` link chain (system libcurl + mbedtls on Linux, system curl on Darwin). Sync users who supply their own transport never import it and pay zero link cost. `libsql://` URLs are rewritten to `https://` internally.
+
+### Custom HTTP transport
+
+```odin
+import "core:mem"
+import sync "turso/sync"
+
+http_do :: proc(user_data: rawptr, req: sync.HTTP_Request, allocator: mem.Allocator) ->
+    (sync.HTTP_Response, string, bool) {
+    // Plug in core:net, your favorite Odin HTTP lib, etc. Return ok=false + a
+    // message to poison the IO item (the engine surfaces it as the op error).
+    return sync.HTTP_Response{status = 200}, "", true
+}
+
+client := sync.HTTP_Client{roundtrip = http_do, auth_token = "<jwt>"}
 ```
 
 Sync ownership rules:

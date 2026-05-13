@@ -52,6 +52,7 @@ sync-sdk-kit:
 check:
 	odin check turso -no-entry-point
 	odin check turso/sync -no-entry-point -define:TURSO_USE_SYNC_DYLIB=true
+	odin check turso/sync/curlhttp -no-entry-point -define:TURSO_USE_SYNC_DYLIB=true
 	odin check tests
 	odin check tests/sync -define:TURSO_USE_SYNC_DYLIB=true
 	odin check examples/minimal

@@ -55,6 +55,26 @@ ALL_TESTS := [?]Test_Entry{
 
 	{"test_two_connections_share_state", test_two_connections_share_state},
 
+	{"test_db_with_transaction_commit",                  test_db_with_transaction_commit},
+	{"test_db_with_transaction_rollback",                test_db_with_transaction_rollback},
+	{"test_db_with_transaction_manual_commands",         test_db_with_transaction_manual_commands},
+	{"test_db_with_savepoint_release",                   test_db_with_savepoint_release},
+	{"test_db_with_savepoint_rollback",                  test_db_with_savepoint_rollback},
+	{"test_db_with_savepoint_nested",                    test_db_with_savepoint_nested},
+	{"test_db_with_transaction_body_failure_propagates", test_db_with_transaction_body_failure_propagates},
+
+	{"test_stmt_scan_struct_by_name",                  test_stmt_scan_struct_by_name},
+	{"test_stmt_scan_struct_tag_override",             test_stmt_scan_struct_tag_override},
+	{"test_stmt_scan_struct_missing_column_ignored",   test_stmt_scan_struct_missing_column_ignored},
+	{"test_stmt_scan_struct_extra_column_ignored",     test_stmt_scan_struct_extra_column_ignored},
+	{"test_stmt_scan_struct_type_mismatch_errors",     test_stmt_scan_struct_type_mismatch_errors},
+	{"test_stmt_scan_struct_null_handling",            test_stmt_scan_struct_null_handling},
+	{"test_stmt_scan_struct_not_a_struct_errors",      test_stmt_scan_struct_not_a_struct_errors},
+	{"test_db_query_one_struct",                       test_db_query_one_struct},
+	{"test_db_query_optional_struct_zero_rows",        test_db_query_optional_struct_zero_rows},
+	{"test_db_query_optional_struct_one_row",          test_db_query_optional_struct_one_row},
+	{"test_db_query_all_struct",                       test_db_query_all_struct},
+
 	{"test_async_io_basic_operations",     test_async_io_basic_operations},
 	{"test_async_io_step_iteration",       test_async_io_step_iteration},
 	{"test_async_io_step_once_manual_drive", test_async_io_step_once_manual_drive},

@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:os"
 import turso "../../turso"
 import sync "../../turso/sync"
+import curlhttp "../../turso/sync/curlhttp"
 
 // test_sync_cloud_e2e is the env-gated end-to-end test against a real Turso
 // Cloud database. Skipped silently if TURSO_TEST_URL or TURSO_TEST_TOKEN is
@@ -48,7 +49,7 @@ cloud_run_phase_a :: proc(url: string, token: string) {
 		auth_token  = token,
 	}
 	defer delete(cfg.path)
-	client := curl_client(token)
+	client := curlhttp.client(token)
 
 	db, e, ok := sync.database_create(turso.Database_Config{path = cfg.path}, cfg, client)
 	expect_no_err(e, ok, "phase A: sync.database_create against cloud")
@@ -87,7 +88,7 @@ cloud_run_phase_b :: proc(url: string, token: string) {
 		bootstrap_if_empty = true,
 	}
 	defer delete(cfg.path)
-	client := curl_client(token)
+	client := curlhttp.client(token)
 
 	db, e, ok := sync.database_create(turso.Database_Config{path = cfg.path}, cfg, client)
 	expect_no_err(e, ok, "phase B: sync.database_create on fresh dir (bootstrap from remote)")
@@ -127,7 +128,7 @@ cloud_run_cleanup :: proc(url: string, token: string) {
 		auth_token  = token,
 	}
 	defer delete(cfg.path)
-	client := curl_client(token)
+	client := curlhttp.client(token)
 
 	db, e, ok := sync.database_create(turso.Database_Config{path = cfg.path}, cfg, client)
 	expect_no_err(e, ok, "cleanup: sync.database_create")
