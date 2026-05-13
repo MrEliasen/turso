@@ -51,31 +51,32 @@ cache_clear :: proc(cache: ^Stmt_Cache) {
 	clear(&cache.entries)
 }
 
-// prepare_cached returns a cached prepared statement for sql, creating one on miss.
-// The returned pointer is owned by the cache - do NOT finalize it. Bindings persist
-// across calls; re-bind every parameter before each use to avoid stale data.
+// prepare_cached returns a cached prepared Statement for sql, creating one on
+// miss. The cache owns the underlying C handle — do NOT call finalize on the
+// returned Statement; let cache_destroy / cache_clear handle it. Bindings
+// persist across calls; re-bind every parameter before each use to avoid stale
+// data.
 //
-// On a cache hit the statement is reset() so it's ready to be re-bound and stepped.
-prepare_cached :: proc(conn: Connection, cache: ^Stmt_Cache, sql: string) -> (^Statement, Error, bool) {
+// On a cache hit the statement is reset() so it's ready to be re-bound and
+// stepped. Returns Statement by value — the wrapper is a few pointers + a
+// length, and copying it shares the underlying C handle. This avoids the
+// dangling-pointer hazard that interior map pointers had across map grows.
+prepare_cached :: proc(conn: Connection, cache: ^Stmt_Cache, sql: string) -> (Statement, Error, bool) {
 	if cache == nil {
-		return nil, Error{code = .MISUSE, op = "prepare_cached", sql = sql, message = strings.clone("cache is nil")}, false
+		return Statement{}, make_error(.MISUSE, "prepare_cached", "cache is nil", sql), false
 	}
 
 	if sql in cache.entries {
-		e, ok := reset(cache.entries[sql])
-		if !ok { return nil, e, false }
-		// We need a stable pointer; iterate via the map key. Odin maps return
-		// pointers via the &cache.entries[key] pattern.
-		stmt_ptr := &cache.entries[sql]
-		return stmt_ptr, error_none(), true
+		stmt := cache.entries[sql]
+		if e, ok := reset(stmt); !ok { return Statement{}, e, false }
+		return stmt, error_none(), true
 	}
 
 	stmt, err, ok := prepare(conn, sql)
-	if !ok { return nil, err, false }
+	if !ok { return Statement{}, err, false }
 
 	owned_sql := strings.clone(sql)
 	stmt.sql = owned_sql
 	cache.entries[owned_sql] = stmt
-	stmt_ptr := &cache.entries[owned_sql]
-	return stmt_ptr, error_none(), true
+	return stmt, error_none(), true
 }

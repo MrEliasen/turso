@@ -48,10 +48,14 @@ make_temp_dir :: proc(name: string) -> string {
 	return path
 }
 
-// remove_temp_dir wipes the directory created by make_temp_dir. Idempotent.
+// remove_temp_dir wipes the directory created by make_temp_dir AND frees the
+// Odin string holding the path. Idempotent on an empty path. Caller's `dir`
+// view becomes dangling; pair `defer remove_temp_dir(dir)` with the call site
+// just like Odin's stdlib `defer delete(...)` patterns.
 remove_temp_dir :: proc(path: string) {
 	if path == "" { return }
 	os.remove_all(path)
+	delete(path)
 }
 
 // db_path joins a sync directory with a stable filename.

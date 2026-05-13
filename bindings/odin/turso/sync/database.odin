@@ -109,7 +109,11 @@ open_or_create :: proc(
 		return Sync_Database{}, drive_err, false
 	}
 
-	return Sync_Database{handle = db_handle, client = client, config = cfg}, turso.error_none(), true
+	// Deep-copy the Config so the Sync_Database is independent of the caller's
+	// string lifetimes. Subsequent push/pull/checkpoint calls read these
+	// fields through db.config; freeing the caller's buffers between calls
+	// would otherwise yield UB.
+	return Sync_Database{handle = db_handle, client = client, config = clone_config(cfg)}, turso.error_none(), true
 }
 
 // database_close releases the underlying handle. Idempotent.
@@ -117,6 +121,32 @@ database_close :: proc(db: ^Sync_Database) {
 	if db == nil || db.handle == nil { return }
 	raw.turso_sync_database_deinit(db.handle)
 	db.handle = nil
+	free_config(&db.config)
+}
+
+@(private)
+clone_config :: proc(cfg: Config) -> Config {
+	out := cfg
+	if cfg.path                             != "" { out.path                             = strings.clone(cfg.path) }
+	if cfg.remote_url                       != "" { out.remote_url                       = strings.clone(cfg.remote_url) }
+	if cfg.client_name                      != "" { out.client_name                      = strings.clone(cfg.client_name) }
+	if cfg.auth_token                       != "" { out.auth_token                       = strings.clone(cfg.auth_token) }
+	if cfg.partial_bootstrap_strategy_query != "" { out.partial_bootstrap_strategy_query = strings.clone(cfg.partial_bootstrap_strategy_query) }
+	if cfg.remote_encryption_key            != "" { out.remote_encryption_key            = strings.clone(cfg.remote_encryption_key) }
+	if cfg.remote_encryption_cipher         != "" { out.remote_encryption_cipher         = strings.clone(cfg.remote_encryption_cipher) }
+	return out
+}
+
+@(private)
+free_config :: proc(cfg: ^Config) {
+	if cfg == nil { return }
+	if len(cfg.path)                             > 0 { delete(cfg.path);                             cfg.path = "" }
+	if len(cfg.remote_url)                       > 0 { delete(cfg.remote_url);                       cfg.remote_url = "" }
+	if len(cfg.client_name)                      > 0 { delete(cfg.client_name);                      cfg.client_name = "" }
+	if len(cfg.auth_token)                       > 0 { delete(cfg.auth_token);                       cfg.auth_token = "" }
+	if len(cfg.partial_bootstrap_strategy_query) > 0 { delete(cfg.partial_bootstrap_strategy_query); cfg.partial_bootstrap_strategy_query = "" }
+	if len(cfg.remote_encryption_key)            > 0 { delete(cfg.remote_encryption_key);            cfg.remote_encryption_key = "" }
+	if len(cfg.remote_encryption_cipher)         > 0 { delete(cfg.remote_encryption_cipher);         cfg.remote_encryption_cipher = "" }
 }
 
 // changes_close frees an unconsumed change set. After apply_changes is called

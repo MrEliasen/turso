@@ -75,7 +75,7 @@ Status_Code :: raw.Status_Code
 Error :: struct {
 	code:    Status_Code,
 	message: string,  // owned by Error (cloned from C); free with error_destroy
-	sql:     string,  // borrowed
+	sql:     string,  // owned by Error (cloned at construction); free with error_destroy
 	op:      string,  // static literal identifying the call site
 	ctx:     string,  // borrowed
 }

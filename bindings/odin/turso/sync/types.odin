@@ -1,6 +1,5 @@
 package turso_sync
 
-import "core:strings"
 import raw "raw"
 import turso "../"
 
@@ -35,8 +34,10 @@ Config :: struct {
 	pull_bytes_threshold:              uint,
 }
 
-// Sync_Database owns the synced-DB handle and the HTTP client used to satisfy
-// every IO request emitted by the engine. Always pair with database_close.
+// Sync_Database owns the synced-DB handle, the HTTP client used to satisfy
+// every IO request emitted by the engine, and a deep copy of the Config so the
+// instance is independent of the caller's string lifetimes. Always pair with
+// database_close.
 //
 // All sync operations on a Sync_Database must be serialized by the caller
 // (same rule as the Go binding's internal mutex). Concurrent push/pull/
@@ -44,7 +45,7 @@ Config :: struct {
 Sync_Database :: struct {
 	handle: raw.Database_Ptr,
 	client: HTTP_Client,
-	config: Config,
+	config: Config,  // owned (deep-cloned from caller's Config at create time)
 }
 
 // Sync_Changes is an opaque change set produced by pull's wait-changes phase.
@@ -85,9 +86,5 @@ sync_db_is_open :: proc(d: Sync_Database) -> bool { return d.handle != nil }
 
 @(private)
 sync_misuse :: proc(op: string, reason: string) -> turso.Error {
-	return turso.Error{
-		code    = .MISUSE,
-		op      = op,
-		message = strings.clone(reason),
-	}
+	return turso.make_error(.MISUSE, op, reason)
 }

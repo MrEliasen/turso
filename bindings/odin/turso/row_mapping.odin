@@ -5,7 +5,6 @@ import "base:runtime"
 import "core:fmt"
 import "core:mem"
 import "core:reflect"
-import "core:strings"
 
 // Reflection-based row → struct mapping. No FFI changes; everything goes
 // through the existing column accessors. Name resolution: field tag
@@ -26,24 +25,36 @@ import "core:strings"
 
 // stmt_scan_struct populates `out^` from the current row. Caller must have
 // stepped the statement to a Row first.
+//
+// Two-pass design: pass 1 walks every column and validates kind-vs-field-type
+// without allocating; pass 2 then allocates + writes. This guarantees no
+// orphaned TEXT/BLOB allocations on a kind-mismatch error — any earlier
+// failure aborts before any allocation happens.
 stmt_scan_struct :: proc(stmt: Statement, out: ^$T, allocator := context.allocator) -> (Error, bool) {
 	if out == nil {
-		return Error{
-			code = .MISUSE, op = "stmt_scan_struct",
-			message = strings.clone("out pointer is nil"),
-		}, false
+		return make_error(.MISUSE, "stmt_scan_struct", "out pointer is nil"), false
 	}
 
 	ti := runtime.type_info_base(type_info_of(T))
 	s, is_struct := ti.variant.(runtime.Type_Info_Struct)
 	if !is_struct {
-		return Error{
-			code = .MISUSE, op = "stmt_scan_struct",
-			message = strings.clone(fmt.tprintf("T must be a struct (got %v)", typeid_of(T))),
-		}, false
+		msg := fmt.tprintf("T must be a struct (got %v)", typeid_of(T))
+		return make_error(.MISUSE, "stmt_scan_struct", msg), false
 	}
 
 	n := int(column_count(stmt))
+
+	// Resolve column → field mapping once, validating types in the same pass.
+	// Stored on the stack; no heap allocation. Max columns is bounded by SQL
+	// engine limits, but keep a sane cap.
+	MAX_COLS :: 256
+	if n > MAX_COLS {
+		msg := fmt.tprintf("too many columns for stmt_scan_struct (got %d, max %d)", n, MAX_COLS)
+		return make_error(.MISUSE, "stmt_scan_struct", msg), false
+	}
+	plans: [MAX_COLS]Scan_Plan
+	plan_count := 0
+
 	for col_idx in 0 ..< n {
 		col_name := stmt_column_name(stmt, col_idx)
 		defer delete(col_name)
@@ -54,12 +65,37 @@ stmt_scan_struct :: proc(stmt: Statement, out: ^$T, allocator := context.allocat
 		target_ptr := rawptr(uintptr(out) + s.offsets[field_index])
 		field_type := s.types[field_index]
 		display_name := s.names[field_index]
+		kind := stmt_value_kind(stmt, col_idx)
 
-		if e, ok := scan_column_into(stmt, col_idx, target_ptr, field_type, display_name, allocator); !ok {
+		if e, ok := validate_column_against_field(kind, field_type, display_name); !ok {
 			return e, false
 		}
+
+		plans[plan_count] = Scan_Plan{
+			col_idx    = col_idx,
+			target_ptr = target_ptr,
+			field_type = field_type,
+			kind       = kind,
+		}
+		plan_count += 1
+	}
+
+	// Allocation pass. Validation already succeeded, so every plan is safe to
+	// execute and the only remaining failure mode (e.g. an OOM during clone)
+	// is unrecoverable.
+	for i in 0 ..< plan_count {
+		p := plans[i]
+		write_column(stmt, p.col_idx, p.target_ptr, p.field_type, p.kind, allocator)
 	}
 	return error_none(), true
+}
+
+@(private)
+Scan_Plan :: struct {
+	col_idx:    int,
+	target_ptr: rawptr,
+	field_type: ^runtime.Type_Info,
+	kind:       Value_Kind,
 }
 
 // db_query_one_struct prepares + binds + steps `sql`, expects exactly one
@@ -76,20 +112,14 @@ db_query_one_struct :: proc(conn: Connection, sql: string, out: ^$T, args: ..Bin
 	sr, e3, ok3 := step(stmt)
 	if !ok3 { return e3, false }
 	if sr != .Row {
-		return Error{
-			code = .ERROR, op = "db_query_one_struct", sql = strings.clone(sql),
-			message = strings.clone("expected exactly one row, got zero"),
-		}, false
+		return make_error(.ERROR, "db_query_one_struct", "expected exactly one row, got zero", sql), false
 	}
 
 	if se, sok := stmt_scan_struct(stmt, out); !sok { return se, false }
 
 	sr2, _, _ := step(stmt)
 	if sr2 == .Row {
-		return Error{
-			code = .ERROR, op = "db_query_one_struct", sql = strings.clone(sql),
-			message = strings.clone("expected exactly one row, got multiple"),
-		}, false
+		return make_error(.ERROR, "db_query_one_struct", "expected exactly one row, got multiple", sql), false
 	}
 	return error_none(), true
 }
@@ -114,10 +144,7 @@ db_query_optional_struct :: proc(conn: Connection, sql: string, out: ^$T, args: 
 
 	sr2, _, _ := step(stmt)
 	if sr2 == .Row {
-		return false, Error{
-			code = .ERROR, op = "db_query_optional_struct", sql = strings.clone(sql),
-			message = strings.clone("expected at most one row, got multiple"),
-		}, false
+		return false, make_error(.ERROR, "db_query_optional_struct", "expected at most one row, got multiple", sql), false
 	}
 	return true, error_none(), true
 }
@@ -165,56 +192,72 @@ field_target_name :: proc(s: runtime.Type_Info_Struct, j: int) -> string {
 	return s.names[j]
 }
 
+// validate_column_against_field is pass 1: checks that the source kind can be
+// coerced into the destination field type. Never allocates. NULL kind is
+// always accepted regardless of field type (the write pass will zero the
+// destination region).
 @(private)
-scan_column_into :: proc(
-	stmt: Statement,
-	col_idx: int,
-	target_ptr: rawptr,
+validate_column_against_field :: proc(
+	kind: Value_Kind,
 	field_type: ^runtime.Type_Info,
 	field_name: string,
-	allocator: mem.Allocator,
 ) -> (Error, bool) {
-	kind := stmt_value_kind(stmt, col_idx)
+	if kind == .NULL { return error_none(), true }
 	base := runtime.type_info_base(field_type)
-
-	if kind == .NULL {
-		// Zero the destination region. Works for primitives, strings ({nil,0})
-		// and slices ({nil,0}). Caller is expected to pass a freshly-declared
-		// T, so this is usually a no-op — but cheap insurance for reused structs.
-		intrinsics.mem_zero(target_ptr, base.size)
-		return error_none(), true
-	}
 
 	#partial switch v in base.variant {
 	case runtime.Type_Info_Integer:
 		if kind != .INTEGER { return mismatch_error(field_name, kind, base), false }
-		write_integer(target_ptr, base.size, v.signed, stmt_get_int(stmt, col_idx))
 		return error_none(), true
-
 	case runtime.Type_Info_Float:
-		if kind != .REAL { return mismatch_error(field_name, kind, base), false }
-		write_float(target_ptr, base.size, stmt_get_double(stmt, col_idx))
+		if kind != .REAL    { return mismatch_error(field_name, kind, base), false }
 		return error_none(), true
-
 	case runtime.Type_Info_Boolean:
 		if kind != .INTEGER { return mismatch_error(field_name, kind, base), false }
-		(^bool)(target_ptr)^ = stmt_get_int(stmt, col_idx) != 0
 		return error_none(), true
-
 	case runtime.Type_Info_String:
-		if v.is_cstring { return mismatch_error(field_name, kind, base), false }
-		if kind != .TEXT { return mismatch_error(field_name, kind, base), false }
-		(^string)(target_ptr)^ = stmt_get_text(stmt, col_idx, allocator)
+		if v.is_cstring     { return mismatch_error(field_name, kind, base), false }
+		if kind != .TEXT    { return mismatch_error(field_name, kind, base), false }
 		return error_none(), true
-
 	case runtime.Type_Info_Slice:
-		if v.elem.id != u8 { return mismatch_error(field_name, kind, base), false }
-		if kind != .BLOB { return mismatch_error(field_name, kind, base), false }
-		(^[]u8)(target_ptr)^ = stmt_get_blob(stmt, col_idx, allocator)
+		if v.elem.id != u8  { return mismatch_error(field_name, kind, base), false }
+		if kind != .BLOB    { return mismatch_error(field_name, kind, base), false }
 		return error_none(), true
 	}
-
 	return mismatch_error(field_name, kind, base), false
+}
+
+// write_column is pass 2: assumes validate_column_against_field already
+// accepted the (kind, field_type) pair. Performs the actual allocation/copy
+// into the struct field.
+@(private)
+write_column :: proc(
+	stmt: Statement,
+	col_idx: int,
+	target_ptr: rawptr,
+	field_type: ^runtime.Type_Info,
+	kind: Value_Kind,
+	allocator: mem.Allocator,
+) {
+	base := runtime.type_info_base(field_type)
+
+	if kind == .NULL {
+		intrinsics.mem_zero(target_ptr, base.size)
+		return
+	}
+
+	#partial switch v in base.variant {
+	case runtime.Type_Info_Integer:
+		write_integer(target_ptr, base.size, v.signed, stmt_get_int(stmt, col_idx))
+	case runtime.Type_Info_Float:
+		write_float(target_ptr, base.size, stmt_get_double(stmt, col_idx))
+	case runtime.Type_Info_Boolean:
+		(^bool)(target_ptr)^ = stmt_get_int(stmt, col_idx) != 0
+	case runtime.Type_Info_String:
+		(^string)(target_ptr)^ = stmt_get_text(stmt, col_idx, allocator)
+	case runtime.Type_Info_Slice:
+		(^[]u8)(target_ptr)^ = stmt_get_blob(stmt, col_idx, allocator)
+	}
 }
 
 @(private)
@@ -241,11 +284,6 @@ write_float :: proc(target_ptr: rawptr, size: int, val: f64) {
 
 @(private)
 mismatch_error :: proc(field_name: string, kind: Value_Kind, ti: ^runtime.Type_Info) -> Error {
-	return Error{
-		code    = .ERROR,
-		op      = "stmt_scan_struct",
-		message = strings.clone(fmt.tprintf(
-			"column kind=%v cannot map into field %q (size=%d)", kind, field_name, ti.size,
-		)),
-	}
+	msg := fmt.tprintf("column kind=%v cannot map into field %q (size=%d)", kind, field_name, ti.size)
+	return make_error(.ERROR, "stmt_scan_struct", msg)
 }

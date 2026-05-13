@@ -1,0 +1,135 @@
+name: Odin
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+    paths:
+      - 'bindings/odin/**'
+      - 'sdk-kit/**'
+      - 'sync/sdk-kit/**'
+      - 'sync/engine/**'
+      - 'core/**'
+      - '.github/workflows/odin.yml'
+  pull_request:
+    branches: ["main"]
+    paths:
+      - 'bindings/odin/**'
+      - 'sdk-kit/**'
+      - 'sync/sdk-kit/**'
+      - 'sync/engine/**'
+      - 'core/**'
+      - '.github/workflows/odin.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "10"
+  # Pinned Odin release. Bump together when upgrading the binding's required
+  # Odin features. The dev-YYYY-MM tags ship prebuilt Linux + macOS artifacts
+  # on https://github.com/odin-lang/Odin/releases.
+  ODIN_RELEASE_TAG: "dev-2026-05"
+
+jobs:
+  test:
+    name: Build dylibs + run Odin tests
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: blacksmith-4vcpu-ubuntu-2404
+            label: linux
+          - os: blacksmith-6vcpu-macos-latest
+            label: macos
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup mold linker
+        if: runner.os == 'Linux'
+        uses: rui314/setup-mold@v1
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-rust"
+          cache-on-failure: true
+
+      - uses: "./.github/shared/setup-sccache"
+
+      - name: Install libcurl + mbedtls (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev libmbedtls-dev
+
+      - name: Install Odin (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euxo pipefail
+          mkdir -p "$HOME/odin"
+          curl -fL -o /tmp/odin.tar.gz \
+            "https://github.com/odin-lang/Odin/releases/download/${ODIN_RELEASE_TAG}/odin-ubuntu-amd64-${ODIN_RELEASE_TAG}.tar.gz"
+          tar -xzf /tmp/odin.tar.gz -C "$HOME/odin" --strip-components=1
+          echo "$HOME/odin" >> "$GITHUB_PATH"
+
+      - name: Install Odin (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euxo pipefail
+          mkdir -p "$HOME/odin"
+          # macOS Blacksmith runners are arm64; fall back to amd64 if arch differs.
+          ARCH_TAG="$(uname -m | sed 's/x86_64/amd64/; s/arm64/arm64/')"
+          curl -fL -o /tmp/odin.tar.gz \
+            "https://github.com/odin-lang/Odin/releases/download/${ODIN_RELEASE_TAG}/odin-macos-${ARCH_TAG}-${ODIN_RELEASE_TAG}.tar.gz"
+          tar -xzf /tmp/odin.tar.gz -C "$HOME/odin" --strip-components=1
+          echo "$HOME/odin" >> "$GITHUB_PATH"
+
+      - name: Verify Odin
+        run: odin version
+
+      - name: Build dylibs (debug)
+        run: cargo build -p turso_sdk_kit -p turso_sync_sdk_kit --verbose --locked
+
+      - name: odin check
+        working-directory: bindings/odin
+        run: make check
+
+      - name: make test
+        working-directory: bindings/odin
+        run: make test
+
+      - name: Detect cloud creds
+        id: cloud
+        shell: bash
+        env:
+          HAS_URL: ${{ secrets.TURSO_TEST_URL != '' }}
+          HAS_TOKEN: ${{ secrets.TURSO_TEST_TOKEN != '' }}
+        run: |
+          if [ "$HAS_URL" = "true" ] && [ "$HAS_TOKEN" = "true" ]; then
+            echo "have_creds=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_creds=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: make sync-test (without cloud creds)
+        if: steps.cloud.outputs.have_creds != 'true'
+        working-directory: bindings/odin
+        run: make sync-test
+
+      - name: make sync-test (with cloud E2E)
+        if: steps.cloud.outputs.have_creds == 'true'
+        working-directory: bindings/odin
+        env:
+          TURSO_TEST_URL: ${{ secrets.TURSO_TEST_URL }}
+          TURSO_TEST_TOKEN: ${{ secrets.TURSO_TEST_TOKEN }}
+        run: make sync-test

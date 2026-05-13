@@ -44,9 +44,14 @@ db_rollback :: proc(conn: Connection) -> (Error, bool) {
 
 // db_savepoint runs `SAVEPOINT "name"`. The name is double-quoted to escape
 // reserved words / unusual characters; pre-existing double quotes are
-// doubled per SQLite's identifier rules.
+// doubled per SQLite's identifier rules. NUL bytes in `name` are rejected
+// up-front (they would truncate the C-string passed to the engine and yield
+// a confusing parse error).
 db_savepoint :: proc(conn: Connection, name: string) -> (Error, bool) {
-	sql := build_savepoint_sql("SAVEPOINT ", name)
+	sql, name_ok := build_savepoint_sql("SAVEPOINT ", name)
+	if !name_ok {
+		return make_error(.MISUSE, "db_savepoint", "savepoint name contains NUL byte"), false
+	}
 	defer delete(sql)
 	_, e, ok := db_exec(conn, sql)
 	return e, ok
@@ -56,7 +61,10 @@ db_savepoint :: proc(conn: Connection, name: string) -> (Error, bool) {
 // and commits its work into the surrounding transaction (or outer DB if at
 // top level).
 db_release :: proc(conn: Connection, name: string) -> (Error, bool) {
-	sql := build_savepoint_sql("RELEASE ", name)
+	sql, name_ok := build_savepoint_sql("RELEASE ", name)
+	if !name_ok {
+		return make_error(.MISUSE, "db_release", "savepoint name contains NUL byte"), false
+	}
 	defer delete(sql)
 	_, e, ok := db_exec(conn, sql)
 	return e, ok
@@ -66,7 +74,10 @@ db_release :: proc(conn: Connection, name: string) -> (Error, bool) {
 // reverts work since the named savepoint but does NOT pop it from the
 // stack — pair with db_release if you want to discard the savepoint.
 db_rollback_to :: proc(conn: Connection, name: string) -> (Error, bool) {
-	sql := build_savepoint_sql("ROLLBACK TO ", name)
+	sql, name_ok := build_savepoint_sql("ROLLBACK TO ", name)
+	if !name_ok {
+		return make_error(.MISUSE, "db_rollback_to", "savepoint name contains NUL byte"), false
+	}
 	defer delete(sql)
 	_, e, ok := db_exec(conn, sql)
 	return e, ok
@@ -111,8 +122,14 @@ db_with_savepoint :: proc(conn: Connection, name: string, body: proc(conn: Conne
 	return error_none(), true
 }
 
+// build_savepoint_sql doubles embedded double-quotes (SQLite identifier
+// escape) and rejects NUL bytes. Returns (sql, true) on success, ("", false)
+// when name contained a NUL.
 @(private)
-build_savepoint_sql :: proc(prefix: string, name: string) -> string {
+build_savepoint_sql :: proc(prefix: string, name: string) -> (string, bool) {
+	for i in 0 ..< len(name) {
+		if name[i] == 0 { return "", false }
+	}
 	sb: strings.Builder
 	strings.builder_init(&sb)
 	strings.write_string(&sb, prefix)
@@ -123,5 +140,5 @@ build_savepoint_sql :: proc(prefix: string, name: string) -> string {
 		strings.write_byte(&sb, c)
 	}
 	strings.write_byte(&sb, '"')
-	return strings.to_string(sb)
+	return strings.to_string(sb), true
 }

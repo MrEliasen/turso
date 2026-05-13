@@ -1,6 +1,7 @@
 package sync_tests
 
 import "core:fmt"
+import "core:mem"
 
 Test_Entry :: struct {
 	name: string,
@@ -39,9 +40,17 @@ ALL_TESTS := [?]Test_Entry{
 	{"test_pull_updates_with_pages_handler_returns_installed_bytes", test_pull_updates_with_pages_handler_returns_installed_bytes},
 	{"test_sync_bootstrap_from_captured_pages",                test_sync_bootstrap_from_captured_pages},
 	{"test_sync_cloud_e2e",                     test_sync_cloud_e2e},
+
+	// New audit tests
+	{"test_http_client_auth_token_is_forwarded", test_http_client_auth_token_is_forwarded},
 }
 
 main :: proc() {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
 	passed := 0
 	for t in ALL_TESTS {
 		fmt.printf("[ RUN  ] %s\n", t.name)
@@ -50,4 +59,19 @@ main :: proc() {
 		passed += 1
 	}
 	fmt.printf("\n%d/%d tests passed\n", passed, len(ALL_TESTS))
+
+	if len(track.allocation_map) > 0 {
+		fmt.eprintf("\n=== %d LEAKED ALLOCATIONS ===\n", len(track.allocation_map))
+		for _, entry in track.allocation_map {
+			fmt.eprintf("  %v bytes @ %v\n", entry.size, entry.location)
+		}
+	} else {
+		fmt.printf("\n[OK] zero leaked allocations\n")
+	}
+	if len(track.bad_free_array) > 0 {
+		fmt.eprintf("\n=== %d BAD FREES ===\n", len(track.bad_free_array))
+		for entry in track.bad_free_array {
+			fmt.eprintf("  ptr=%v @ %v\n", entry.memory, entry.location)
+		}
+	}
 }

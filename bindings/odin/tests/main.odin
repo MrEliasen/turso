@@ -1,6 +1,7 @@
 package tests
 
 import "core:fmt"
+import "core:mem"
 
 Test_Entry :: struct {
 	name: string,
@@ -83,9 +84,24 @@ ALL_TESTS := [?]Test_Entry{
 	{"test_cache_resets_between_uses",            test_cache_resets_between_uses},
 	{"test_cache_distinct_sql_get_distinct_entries", test_cache_distinct_sql_get_distinct_entries},
 	{"test_cache_clear_releases_entries",         test_cache_clear_releases_entries},
+
+	// New audit tests — see savepoint_quoting_test.odin / row_mapping_partial_leak_test.odin /
+	// error_sql_leak_test.odin.
+	{"test_savepoint_name_with_injection_payload",     test_savepoint_name_with_injection_payload},
+	{"test_savepoint_name_with_embedded_double_quote", test_savepoint_name_with_embedded_double_quote},
+	{"test_savepoint_name_with_nul_byte",              test_savepoint_name_with_nul_byte},
+	{"test_stmt_scan_struct_partial_failure_leaks_earlier_text_field", test_stmt_scan_struct_partial_failure_leaks_earlier_text_field},
+	{"test_db_query_one_struct_error_clones_sql_and_leaks", test_db_query_one_struct_error_clones_sql_and_leaks},
+	{"test_cache_handle_survives_map_grow",                test_cache_handle_survives_map_grow},
+	{"test_db_rollback_to_error_sql_is_owned",             test_db_rollback_to_error_sql_is_owned},
 }
 
 main :: proc() {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
 	passed := 0
 	for t in ALL_TESTS {
 		fmt.printf("[ RUN  ] %s\n", t.name)
@@ -94,4 +110,19 @@ main :: proc() {
 		passed += 1
 	}
 	fmt.printf("\n%d/%d tests passed\n", passed, len(ALL_TESTS))
+
+	if len(track.allocation_map) > 0 {
+		fmt.eprintf("\n=== %d LEAKED ALLOCATIONS ===\n", len(track.allocation_map))
+		for _, entry in track.allocation_map {
+			fmt.eprintf("  %v bytes @ %v\n", entry.size, entry.location)
+		}
+	} else {
+		fmt.printf("\n[OK] zero leaked allocations\n")
+	}
+	if len(track.bad_free_array) > 0 {
+		fmt.eprintf("\n=== %d BAD FREES ===\n", len(track.bad_free_array))
+		for entry in track.bad_free_array {
+			fmt.eprintf("  ptr=%v @ %v\n", entry.memory, entry.location)
+		}
+	}
 }

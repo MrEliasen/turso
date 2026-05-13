@@ -20,7 +20,7 @@ test_cache_reuses_prepared_statement :: proc() {
 	stmt2, e2, ok2 := turso.prepare_cached(t.conn, &cache, sql)
 	expect_no_err(e2, ok2, "second prepare_cached")
 	expect_eq(turso.cache_count(cache), 1, "still one cached entry on hit")
-	expect_true(stmt1 == stmt2, "cache returns the same statement pointer on hit")
+	expect_true(stmt1.handle == stmt2.handle, "cache hit yields the same underlying C handle")
 }
 
 test_cache_resets_between_uses :: proc() {
@@ -39,11 +39,11 @@ test_cache_resets_between_uses :: proc() {
 	for want in wants {
 		stmt, e, ok := turso.prepare_cached(t.conn, &cache, sql)
 		expect_no_err(e, ok, "prepare_cached")
-		be, bok := turso.stmt_bind_int(stmt^, 1, want)
+		be, bok := turso.stmt_bind_int(stmt, 1, want)
 		expect_no_err(be, bok, "bind on cached stmt")
-		step_expect_row(stmt^)
-		expect_eq(turso.stmt_get_int(stmt^, 0), want, "cached stmt yields correct row")
-		step_expect_done(stmt^)
+		step_expect_row(stmt)
+		expect_eq(turso.stmt_get_int(stmt, 0), want, "cached stmt yields correct row")
+		step_expect_done(stmt)
 	}
 }
 

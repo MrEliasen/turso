@@ -1,7 +1,5 @@
 package turso
 
-import "core:strings"
-
 // db_exec prepares a single statement, executes it, and finalizes. Returns rows-affected.
 db_exec :: proc(conn: Connection, sql: string) -> (rows: u64, err: Error, ok: bool) {
 	stmt, e1, ok1 := prepare(conn, sql)
@@ -32,12 +30,7 @@ db_scalar_i64 :: proc(conn: Connection, sql: string, args: ..Bind_Arg) -> (val: 
 	sr, e3, ok3 := step(stmt)
 	if !ok3 { return 0, e3, false }
 	if sr != .Row {
-		return 0, Error{
-			code    = .ERROR,
-			op      = "db_scalar_i64",
-			sql     = sql,
-			message = strings.clone("query returned no rows"),
-		}, false
+		return 0, make_error(.ERROR, "db_scalar_i64", "query returned no rows", sql), false
 	}
 	return stmt_get_int(stmt, 0), error_none(), true
 }

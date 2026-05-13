@@ -22,13 +22,34 @@ take_error_string :: proc(c_err: cstring, allocator := context.allocator) -> str
 	return out
 }
 
-// error_destroy releases the owned message string. Safe on zero Error.
+// error_destroy releases owned strings (message + sql). Safe on zero Error.
 error_destroy :: proc(err: ^Error) {
 	if err == nil { return }
 	if len(err.message) > 0 {
 		delete(err.message)
 		err.message = ""
 	}
+	if len(err.sql) > 0 {
+		delete(err.sql)
+		err.sql = ""
+	}
+}
+
+// make_error builds an Error with cloned message and sql so the returned value
+// is independent of any caller-side buffer. Pass "" for fields you don't want set.
+// Use this for synthetic errors (no C-side error string); use error_from_status
+// when the C ABI handed back a cstring.
+make_error :: proc(
+	code: Status_Code,
+	op: string = "",
+	message: string = "",
+	sql: string = "",
+	ctx: string = "",
+) -> Error {
+	e := Error{code = code, op = op, ctx = ctx}
+	if message != "" { e.message = strings.clone(message) }
+	if sql     != "" { e.sql     = strings.clone(sql) }
+	return e
 }
 
 error_from_status :: proc(
@@ -38,10 +59,12 @@ error_from_status :: proc(
 	sql: string = "",
 	ctx: string = "",
 ) -> Error {
+	sql_owned: string
+	if sql != "" { sql_owned = strings.clone(sql) }
 	return Error{
 		code    = code,
 		message = take_error_string(c_err),
-		sql     = sql,
+		sql     = sql_owned,
 		op      = op,
 		ctx     = ctx,
 	}

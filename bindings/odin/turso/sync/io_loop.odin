@@ -104,10 +104,23 @@ dispatch_http :: proc(item: raw.Io_Item_Ptr, client: HTTP_Client, base_url: stri
 		return
 	}
 
-	scratch_arena: mem.Arena
-	scratch_buf: [128 * 1024]u8
-	mem.arena_init(&scratch_arena, scratch_buf[:])
-	scratch := mem.arena_allocator(&scratch_arena)
+	// sync.Config.auth_token takes precedence; if the caller left it empty
+	// we fall back to HTTP_Client.auth_token so the convenience constructors
+	// (curlhttp.client(token), HTTP_Client{auth_token = "..."}) actually inject
+	// an Authorization header.
+	effective_token := auth_token
+	if effective_token == "" { effective_token = client.auth_token }
+
+	// Per-request scratch arena: grows on demand (default 128KB blocks) so a
+	// very large auth token or pile of engine headers can't truncate request
+	// fields. dynamic_arena_destroy frees every block we allocated on the way
+	// out of dispatch_http. alignment=64 lets the runtime map allocator (used
+	// by some HTTP_Do implementations, e.g. test stubs that parse JSON) hand
+	// out cache-line aligned buffers without panicking.
+	scratch_pool: mem.Dynamic_Arena
+	mem.dynamic_arena_init(&scratch_pool, block_size = 128 * 1024, alignment = 64)
+	defer mem.dynamic_arena_destroy(&scratch_pool)
+	scratch := mem.dynamic_arena_allocator(&scratch_pool)
 
 	url := resolve_url(base_url, slice_to_string(hreq.url), slice_to_string(hreq.path), scratch)
 	method := strings.clone(slice_to_string(hreq.method), scratch)
@@ -115,7 +128,7 @@ dispatch_http :: proc(item: raw.Io_Item_Ptr, client: HTTP_Client, base_url: stri
 
 	hdr_count := int(hreq.headers)
 	extra := 0
-	if auth_token != "" { extra = 1 }
+	if effective_token != "" { extra = 1 }
 	headers := make([]HTTP_Header, hdr_count + extra, scratch)
 	for i in 0 ..< hdr_count {
 		h: raw.Http_Header
@@ -128,10 +141,10 @@ dispatch_http :: proc(item: raw.Io_Item_Ptr, client: HTTP_Client, base_url: stri
 			value = strings.clone(slice_to_string(h.value), scratch),
 		}
 	}
-	if auth_token != "" {
+	if effective_token != "" {
 		headers[hdr_count] = HTTP_Header{
 			key   = "Authorization",
-			value = strings.concatenate({"Bearer ", auth_token}, scratch),
+			value = strings.concatenate({"Bearer ", effective_token}, scratch),
 		}
 	}
 
@@ -156,10 +169,10 @@ dispatch_http :: proc(item: raw.Io_Item_Ptr, client: HTTP_Client, base_url: stri
 HTTP_PUSH_CHUNK_SIZE :: 64 * 1024
 
 // http_response_chunks slices body into pieces of at most chunk_size bytes,
-// in order. Returns the body as a single slice when chunk_size <= 0. Exposed
-// (not @private) so tests can verify the chunking math; the iteration in
-// push_response_body is otherwise a trivial wrapper around it.
-http_response_chunks :: proc(body: []u8, chunk_size: int, allocator := context.temp_allocator) -> [][]u8 {
+// in order. Returns the body as a single slice when chunk_size <= 0. The
+// returned slice header array is allocated via `allocator` — caller picks the
+// lifetime. Exposed (not @private) so tests can verify the chunking math.
+http_response_chunks :: proc(body: []u8, chunk_size: int, allocator: mem.Allocator) -> [][]u8 {
 	if len(body) == 0 { return nil }
 	if chunk_size <= 0 {
 		out := make([][]u8, 1, allocator)
@@ -179,7 +192,14 @@ http_response_chunks :: proc(body: []u8, chunk_size: int, allocator := context.t
 
 @(private)
 push_response_body :: proc(item: raw.Io_Item_Ptr, body: []u8, chunk_size: int = HTTP_PUSH_CHUNK_SIZE) {
-	for chunk in http_response_chunks(body, chunk_size) {
+	// Per-call arena; freed when this proc returns. Keeps slice-header memory
+	// off the caller's temp_allocator. alignment=64 mirrors dispatch_http's
+	// arena so the same pattern holds if the engine ever asks for cache-line
+	// aligned scratch.
+	chunk_pool: mem.Dynamic_Arena
+	mem.dynamic_arena_init(&chunk_pool, alignment = 64)
+	defer mem.dynamic_arena_destroy(&chunk_pool)
+	for chunk in http_response_chunks(body, chunk_size, mem.dynamic_arena_allocator(&chunk_pool)) {
 		buf := bytes_to_slice_ref(chunk)
 		raw.turso_sync_database_io_push_buffer(item, &buf)
 	}

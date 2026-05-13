@@ -14,7 +14,7 @@ import raw "raw"
 // To enable logging: call setup() with a Setup_Options before database_open().
 database_open :: proc(cfg: Database_Config) -> (Database, Error, bool) {
 	if cfg.path == "" {
-		return Database{}, Error{code = .MISUSE, op = "database_open", message = strings.clone("Database_Config.path is required")}, false
+		return Database{}, make_error(.MISUSE, "database_open", "Database_Config.path is required"), false
 	}
 
 	c_path := strings.clone_to_cstring(cfg.path, context.allocator)
@@ -83,11 +83,7 @@ database_close :: proc(db: ^Database) {
 // Applies busy_timeout_ms from the Database_Config if > 0.
 connect :: proc(db: Database) -> (Connection, Error, bool) {
 	if db.handle == nil {
-		return Connection{}, Error{
-			code    = .MISUSE,
-			op      = "connect",
-			message = strings.clone("database is not open"),
-		}, false
+		return Connection{}, make_error(.MISUSE, "connect", "database is not open"), false
 	}
 	conn_handle: raw.Connection_Ptr
 	c_err: cstring

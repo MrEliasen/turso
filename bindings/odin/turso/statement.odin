@@ -8,7 +8,7 @@ import raw "raw"
 // text is ignored - use prepare_first to iterate.
 prepare :: proc(conn: Connection, sql: string) -> (Statement, Error, bool) {
 	if conn.handle == nil {
-		return Statement{}, Error{code = .MISUSE, op = "prepare", sql = sql, message = strings.clone("connection is not open")}, false
+		return Statement{}, make_error(.MISUSE, "prepare", "connection is not open", sql), false
 	}
 	c_sql := strings.clone_to_cstring(sql, context.allocator)
 	defer delete(c_sql)
@@ -28,7 +28,7 @@ prepare :: proc(conn: Connection, sql: string) -> (Statement, Error, bool) {
 // when no more statements can be parsed.
 prepare_first :: proc(conn: Connection, sql: string) -> (stmt: Statement, tail: int, err: Error, ok: bool) {
 	if conn.handle == nil {
-		return Statement{}, 0, Error{code = .MISUSE, op = "prepare_first", sql = sql, message = strings.clone("connection is not open")}, false
+		return Statement{}, 0, make_error(.MISUSE, "prepare_first", "connection is not open", sql), false
 	}
 	c_sql := strings.clone_to_cstring(sql, context.allocator)
 	defer delete(c_sql)
@@ -54,7 +54,7 @@ prepare_first :: proc(conn: Connection, sql: string) -> (stmt: Statement, tail: 
 // yourself (e.g. event-loop integration), use step_once + run_io instead.
 step :: proc(stmt: Statement) -> (Step_Result, Error, bool) {
 	if stmt.handle == nil {
-		return .Done, Error{code = .MISUSE, op = "step", sql = stmt.sql, message = strings.clone("statement is not open")}, false
+		return .Done, make_error(.MISUSE, "step", "statement is not open", stmt.sql), false
 	}
 	c_err: cstring
 	for {
@@ -83,7 +83,7 @@ step :: proc(stmt: Statement) -> (Step_Result, Error, bool) {
 // For most callers, the blocking step() above is the right choice.
 step_once :: proc(stmt: Statement) -> (code: Status_Code, err: Error, ok: bool) {
 	if stmt.handle == nil {
-		return .MISUSE, Error{code = .MISUSE, op = "step_once", sql = stmt.sql, message = strings.clone("statement is not open")}, false
+		return .MISUSE, make_error(.MISUSE, "step_once", "statement is not open", stmt.sql), false
 	}
 	c_err: cstring
 	c := raw.turso_statement_step(stmt.handle, &c_err)
@@ -99,7 +99,7 @@ step_once :: proc(stmt: Statement) -> (code: Status_Code, err: Error, ok: bool) 
 // execute_once returned TURSO_IO. Returns OK on success or an error.
 run_io :: proc(stmt: Statement) -> (Error, bool) {
 	if stmt.handle == nil {
-		return Error{code = .MISUSE, op = "run_io", sql = stmt.sql, message = strings.clone("statement is not open")}, false
+		return make_error(.MISUSE, "run_io", "statement is not open", stmt.sql), false
 	}
 	c_err: cstring
 	code := raw.turso_statement_run_io(stmt.handle, &c_err)
@@ -114,7 +114,7 @@ run_io :: proc(stmt: Statement) -> (Error, bool) {
 // Transparently drives run_io when async_io is enabled.
 execute :: proc(stmt: Statement) -> (rows_changed: u64, err: Error, ok: bool) {
 	if stmt.handle == nil {
-		return 0, Error{code = .MISUSE, op = "execute", sql = stmt.sql, message = strings.clone("statement is not open")}, false
+		return 0, make_error(.MISUSE, "execute", "statement is not open", stmt.sql), false
 	}
 	rows: u64
 	c_err: cstring

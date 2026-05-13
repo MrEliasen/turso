@@ -19,8 +19,7 @@ Shipped:
 - Reflection-based row-to-struct mapping (`stmt_scan_struct`, `db_query_one_struct`, `db_query_optional_struct`, `db_query_all_struct`)
 - Sync engine wrappers (push/pull/checkpoint/stats against Turso Cloud) at `turso/sync/`. Caller supplies an HTTP roundtrip via `HTTP_Client.roundtrip`, OR imports the opt-in libcurl client at `turso/sync/curlhttp/`. See "Sync engine" below.
 
-Deferred:
-- CI workflow for the Odin bindings (`.github/workflows/odin.yml` + cloud-E2E secret injection). See [OUTSTANDING.md](OUTSTANDING.md) Task 5.
+CI: see [`.github/workflows/odin.yml`](../../.github/workflows/odin.yml). Linux + macOS on Blacksmith runners, builds the Rust dylibs then runs `make check` / `make test` / `make sync-test`. Cloud E2E auto-runs when `TURSO_TEST_URL` + `TURSO_TEST_TOKEN` repository secrets are set; otherwise the suite still passes (the cloud test silently skips).
 
 ## Layout
 
@@ -146,8 +145,9 @@ main :: proc() {
 - `Database`, `Connection`, `Statement` are value-types holding raw pointers. Always pair with `database_close`, `conn_close`, `finalize`. All three are idempotent.
 - `stmt_get_text` and `stmt_get_blob` return **copies** owned by the caller. They survive subsequent `step`/`reset`/`finalize`. Free with `delete(...)`.
 - `stmt_column_name`, `stmt_column_decltype`, `stmt_param_name` return owned strings (we copy and free the C original internally). Free with `delete(...)`.
-- `Error.message` is owned by the Error. Call `error_destroy(&err)` or `delete(err.message)` to free.
+- `Error.message` AND `Error.sql` are owned by the Error (cloned at construction). Call `error_destroy(&err)` to free both. `Error.ctx` is borrowed (caller's static literal).
 - `bind_text` / `bind_blob` payloads are copied by Turso during the call - caller's data does not need to outlive the bind.
+- `encryption_hexkey` in `Database_Config` is NOT copied or scrubbed by the binding. If you need the key wiped after `database_open` returns, allocate it yourself and zero the buffer after the call.
 
 ## Threading
 
@@ -220,9 +220,10 @@ client := sync.HTTP_Client{roundtrip = http_do, auth_token = "<jwt>"}
 
 Sync ownership rules:
 - `Sync_Database` is single-threaded. Caller must serialize sync operations.
+- `Sync_Database` deep-copies the `sync.Config` you pass to `database_create` / `database_open`, so it's safe to free or reuse your `Config` strings after the call returns. `database_close` frees the internal copies.
 - `Sync_Changes` returned by `pull`'s wait phase is **consumed** by `apply_changes` (the wrapper handles this internally). A trailing `sync.changes_close` is a no-op.
 - `Stats.revision` is an owned string; free with `sync.stats_destroy(&stats)` or `delete(stats.revision)`.
-- `auth_token` on the `HTTP_Client` is injected as `Authorization: Bearer <token>` on every request. The token is static for the life of the `Sync_Database`; rotate by opening a fresh one.
+- `auth_token` may be set either on `sync.Config` or on `HTTP_Client`. `sync.Config.auth_token` takes precedence; when it's empty the dispatcher falls back to `HTTP_Client.auth_token`. The non-nil value is injected as `Authorization: Bearer <token>` on every request. The token is static for the life of the `Sync_Database`; rotate by opening a fresh one.
 
 ## Source of truth
 
