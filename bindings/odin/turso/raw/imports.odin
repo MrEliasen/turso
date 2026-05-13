@@ -11,16 +11,38 @@ package raw
 // target/debug/, and -Wl,-rpath bakes the path into the binary so the loader
 // finds libturso_sdk_kit.{dylib,so,dll} at run time. To override the file name
 // for distribution layouts, rebuild after editing this file.
-when ODIN_OS == .Windows {
-	foreign import turso "system:turso_sdk_kit.dll"
-} else when ODIN_OS == .Darwin {
-	foreign import turso "system:turso_sdk_kit"
-} else when ODIN_OS == .Linux {
-	foreign import turso "system:turso_sdk_kit"
-} else when ODIN_OS == .FreeBSD {
-	foreign import turso "system:turso_sdk_kit"
-} else when ODIN_OS == .OpenBSD {
-	foreign import turso "system:turso_sdk_kit"
+//
+// When the sync engine is in use the FFI must route through
+// libturso_sync_sdk_kit instead of libturso_sdk_kit so all pointers share one
+// memory namespace (the sync dylib re-exports every core symbol). Build the
+// sync test binary with `-define:TURSO_USE_SYNC_DYLIB=true` to flip the
+// foreign import; the Makefile's `sync-test` target does this for you.
+USE_SYNC_DYLIB :: #config(TURSO_USE_SYNC_DYLIB, false)
+
+when USE_SYNC_DYLIB {
+	when ODIN_OS == .Windows {
+		foreign import turso "system:turso_sync_sdk_kit.dll"
+	} else when ODIN_OS == .Darwin {
+		foreign import turso "system:turso_sync_sdk_kit"
+	} else when ODIN_OS == .Linux {
+		foreign import turso "system:turso_sync_sdk_kit"
+	} else when ODIN_OS == .FreeBSD {
+		foreign import turso "system:turso_sync_sdk_kit"
+	} else when ODIN_OS == .OpenBSD {
+		foreign import turso "system:turso_sync_sdk_kit"
+	}
+} else {
+	when ODIN_OS == .Windows {
+		foreign import turso "system:turso_sdk_kit.dll"
+	} else when ODIN_OS == .Darwin {
+		foreign import turso "system:turso_sdk_kit"
+	} else when ODIN_OS == .Linux {
+		foreign import turso "system:turso_sdk_kit"
+	} else when ODIN_OS == .FreeBSD {
+		foreign import turso "system:turso_sdk_kit"
+	} else when ODIN_OS == .OpenBSD {
+		foreign import turso "system:turso_sdk_kit"
+	}
 }
 
 // turso_status_code_t - turso.h:19-36

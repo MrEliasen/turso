@@ -15,32 +15,42 @@ Shipped:
 - Tracing logger callback (`setup(Setup_Options{log_level, logger})`)
 - Async I/O (`Database_Config.async_io = true`) with transparent `step`/`execute`/`finalize` + explicit `step_once`/`run_io` for event-loop integration
 - Statement cache (`cache_init`, `prepare_cached`, `cache_clear`, `cache_destroy`)
+- Sync engine wrappers (push/pull/checkpoint/stats against Turso Cloud) at `turso/sync/`. Caller supplies an HTTP roundtrip via `HTTP_Client.roundtrip`. See "Sync engine" below.
 
 Deferred:
-- `turso_sync_*` engine (push/pull/checkpoint to Turso Cloud). See [SYNC_HANDOFF.md](SYNC_HANDOFF.md) for the full handoff including effort estimate, C ABI surface analysis, and a starting checklist.
 - Reflection-based row-to-struct mapping
 - Transaction helper (`db_with_transaction` block-style)
+- Protocol-aware HTTP stub for offline push/pull/checkpoint testing (current sync tests cover linking, lifecycle, connect+query, and stats — push/pull/checkpoint need a real or mock cloud endpoint).
 
 ## Layout
 
 ```
 bindings/odin/
-├── turso/          public package
-│   ├── raw/        hand-written FFI declarations matching sdk-kit/turso.h
-│   ├── cache.odin       statement cache
-│   ├── bind.odin        positional + named bind
-│   ├── column.odin      column metadata + row value accessors
-│   ├── connection.odin  database_open/close/connect
-│   ├── errors.odin      error type + string formatting
-│   ├── exec.odin        db_exec, db_exec_args, db_scalar_i64
-│   ├── setup.odin       global setup + tracing logger
-│   ├── statement.odin   prepare/step/execute/finalize + async step_once/run_io
-│   ├── types.odin       Database, Connection, Statement, Bind_Arg, Log_Event
-│   └── version.odin     version()
-├── tests/          test runner + per-area test files (39 tests)
-├── examples/       minimal + named_params runnable examples
-├── Makefile        build + check + test targets
-└── SYNC_HANDOFF.md handoff notes for the sync engine (next session)
+├── turso/                  public package
+│   ├── raw/                hand-written FFI declarations matching sdk-kit/turso.h
+│   ├── sync/               sync engine subpackage (push/pull/checkpoint/stats)
+│   │   ├── raw/            FFI for libturso_sync_sdk_kit (29 procs from turso_sync.h)
+│   │   ├── types.odin      Sync_Database, Config, Stats, Sync_Changes
+│   │   ├── http.odin       HTTP_Client + HTTP_Request/HTTP_Response types
+│   │   ├── file_io.odin    default atomic-read / atomic-write IO handlers
+│   │   ├── io_loop.odin    drive_op_until_done loop + IO dispatch
+│   │   ├── database.odin   sync.database_open/create/close
+│   │   └── operations.odin sync.connect/push/pull/checkpoint/stats
+│   ├── cache.odin          statement cache
+│   ├── bind.odin           positional + named bind
+│   ├── column.odin         column metadata + row value accessors
+│   ├── connection.odin     database_open/close/connect
+│   ├── errors.odin         error type + string formatting
+│   ├── exec.odin           db_exec, db_exec_args, db_scalar_i64
+│   ├── setup.odin          global setup + tracing logger
+│   ├── statement.odin      prepare/step/execute/finalize + async step_once/run_io
+│   ├── types.odin          Database, Connection, Statement, Bind_Arg, Log_Event
+│   └── version.odin        version()
+├── tests/                  local-DB test runner (39 tests)
+│   └── sync/               sync test binary (8 tests; built via make sync-test)
+├── examples/               minimal + named_params runnable examples
+├── Makefile                build + check + test targets
+└── SYNC_HANDOFF.md         legacy sync engine handoff (now landed; see Sync engine below)
 ```
 
 ## Build the C library
@@ -58,13 +68,14 @@ Produces `target/debug/libturso_sdk_kit.{dylib,so,dll}`.
 
 ```sh
 cd bindings/odin
-make check     # static check (no link)
-make test      # runs the full test suite
-make example   # runs examples/minimal
-make examples  # runs every example
+make check       # static check (no link)
+make test        # local-DB test suite (39 tests)
+make sync-test   # sync engine test suite (8 tests, builds libturso_sync_sdk_kit)
+make example     # runs examples/minimal
+make examples    # runs every example
 ```
 
-`make sdk-kit` is a dependency of `make test`/`example`/`examples` and rebuilds the C library if needed.
+`make sdk-kit` is a dependency of `make test`/`example`/`examples` and rebuilds the local-DB C library if needed. `make sync-sdk-kit` rebuilds the sync C library; it is a dependency of `make sync-test`.
 
 ### Direct odin invocation
 
@@ -147,9 +158,61 @@ Every fallible proc returns `(Value, Error, bool)`. Inspect `ok` first; on failu
 
 `Error` is a struct of `code` (Turso status code), `message` (owned string from C, or empty), `sql` (borrowed, the failing SQL if known), `op` (static call-site label), and `ctx` (optional caller-supplied context).
 
+## Sync engine
+
+The sync engine subpackage at `turso/sync/` wraps `sync/sdk-kit/turso_sync.h` (the cloud sync C ABI). It links against `libturso_sync_sdk_kit` which is a self-contained superset of `libturso_sdk_kit` — the sync test binary therefore builds with `-define:TURSO_USE_SYNC_DYLIB=true` so both `turso/raw` and `turso/sync/raw` resolve to the same dylib. This keeps every `turso_*` pointer on a single memory namespace; linking both dylibs in one binary splits `turso_core` state and crashes on cross-lib pointer use.
+
+The engine pulls a request/response loop — the caller satisfies the HTTP and atomic-file IO requests the engine emits, then resumes the operation. HTTP is left to the caller (the engine deliberately does not bundle TLS); pass an `HTTP_Client` whose `.roundtrip` performs one synchronous HTTP round-trip:
+
+```odin
+package main
+
+import "core:fmt"
+import "core:mem"
+import turso "turso"
+import sync "turso/sync"
+
+http_do :: proc(user_data: rawptr, req: sync.HTTP_Request, allocator: mem.Allocator) ->
+    (sync.HTTP_Response, string, bool) {
+    // Plug in libcurl, core:net, your favorite Odin HTTP lib, etc.
+    // Return ok=false + a message to mark the IO item poisoned.
+    return sync.HTTP_Response{status = 200}, "", true
+}
+
+main :: proc() {
+    cfg := sync.Config{
+        path        = "/var/data/synced.db",
+        remote_url  = "https://my-db.turso.io",
+        client_name = "my-app",
+        auth_token  = "<jwt-or-platform-token>",
+    }
+    client := sync.HTTP_Client{roundtrip = http_do, auth_token = cfg.auth_token}
+
+    db, err, ok := sync.database_create(turso.Database_Config{path = cfg.path}, cfg, client)
+    if !ok { fmt.eprintln(turso.error_string(err)); return }
+    defer sync.database_close(&db)
+
+    conn, _, _ := sync.connect(db)
+    defer { _, _ = turso.conn_close(&conn) }
+
+    // ... use conn with turso.prepare / step / finalize as usual.
+
+    _, _          = sync.push(db)         // upload local CDC operations
+    applied, _, _ := sync.pull(db)        // download + apply remote changes
+    _, _          = sync.checkpoint(db)   // truncate local WAL once both sides are caught up
+    _ = applied
+}
+```
+
+Sync ownership rules:
+- `Sync_Database` is single-threaded. Caller must serialize sync operations.
+- `Sync_Changes` returned by `pull`'s wait phase is **consumed** by `apply_changes` (the wrapper handles this internally). A trailing `sync.changes_close` is a no-op.
+- `Stats.revision` is an owned string; free with `sync.stats_destroy(&stats)` or `delete(stats.revision)`.
+- `auth_token` on the `HTTP_Client` is injected as `Authorization: Bearer <token>` on every request. The token is static for the life of the `Sync_Database`; rotate by opening a fresh one.
+
 ## Source of truth
 
-The canonical C ABI is `sdk-kit/turso.h` at the workspace root. The raw layer at `turso/raw/imports.odin` mirrors it 1:1 and includes inline references to header line numbers. When `turso.h` changes, regenerate or update the raw layer.
+The canonical C ABI is `sdk-kit/turso.h` (local DB) plus `sync/sdk-kit/turso_sync.h` (sync engine). The raw layers at `turso/raw/imports.odin` and `turso/sync/raw/imports.odin` mirror each header 1:1 and include inline references to header line numbers. When the headers change, regenerate or update the raw layers.
 
 ## Testing
 
