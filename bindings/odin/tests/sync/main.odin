@@ -37,6 +37,7 @@ ALL_TESTS := [?]Test_Entry{
 	{"test_encode_pull_updates_response_with_one_page",        test_encode_pull_updates_response_with_one_page},
 	{"test_encode_pull_updates_response_with_three_pages",     test_encode_pull_updates_response_with_three_pages},
 	{"test_pull_updates_with_pages_handler_returns_installed_bytes", test_pull_updates_with_pages_handler_returns_installed_bytes},
+	{"test_sync_bootstrap_from_captured_pages",                test_sync_bootstrap_from_captured_pages},
 	{"test_sync_cloud_e2e",                     test_sync_cloud_e2e},
 }
 

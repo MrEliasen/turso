@@ -20,7 +20,7 @@ Shipped:
 - Sync engine wrappers (push/pull/checkpoint/stats against Turso Cloud) at `turso/sync/`. Caller supplies an HTTP roundtrip via `HTTP_Client.roundtrip`, OR imports the opt-in libcurl client at `turso/sync/curlhttp/`. See "Sync engine" below.
 
 Deferred:
-- Bootstrap-pull protobuf stub that emits valid SQLite page bytes end-to-end. The encoder and an installable stub handler are in place (`encode_pull_updates_response`, `pull_updates_with_pages_handler`); the engine-driven coverage that captures real page bytes from a freshly-created local DB is the remaining piece.
+- CI workflow for the Odin bindings (`.github/workflows/odin.yml` + cloud-E2E secret injection). See [OUTSTANDING.md](OUTSTANDING.md) Task 5.
 
 ## Layout
 
@@ -50,7 +50,7 @@ bindings/odin/
 │   ├── types.odin          Database, Connection, Statement, Bind_Arg, Log_Event
 │   └── version.odin        version()
 ├── tests/                  local-DB test runner (60 tests)
-│   └── sync/               sync test binary (30 tests; built via make sync-test)
+│   └── sync/               sync test binary (31 tests; built via make sync-test)
 ├── examples/               minimal + named_params runnable examples
 ├── Makefile                build + check + test targets
 └── SYNC_HANDOFF.md         legacy sync engine handoff (now landed; see Sync engine below)
@@ -73,7 +73,7 @@ Produces `target/debug/libturso_sdk_kit.{dylib,so,dll}`.
 cd bindings/odin
 make check       # static check (no link)
 make test        # local-DB test suite (60 tests)
-make sync-test   # sync engine test suite (30 tests, builds libturso_sync_sdk_kit; cloud E2E gated by TURSO_TEST_URL / TURSO_TEST_TOKEN)
+make sync-test   # sync engine test suite (31 tests, builds libturso_sync_sdk_kit; cloud E2E gated by TURSO_TEST_URL / TURSO_TEST_TOKEN)
 make example     # runs examples/minimal
 make examples    # runs every example
 ```
