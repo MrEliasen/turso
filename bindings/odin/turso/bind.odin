@@ -1,0 +1,118 @@
+package turso
+
+import "core:fmt"
+import "core:strings"
+import raw "raw"
+
+@(private)
+bind_status :: proc(stmt: Statement, code: Status_Code, op: string) -> (Error, bool) {
+	if code == .OK { return error_none(), true }
+	return Error{
+		code    = code,
+		op      = op,
+		sql     = stmt.sql,
+		message = strings.clone(status_name(code)),
+	}, false
+}
+
+stmt_bind_null :: proc(stmt: Statement, position: int) -> (Error, bool) {
+	if stmt.handle == nil { return Error{code = .MISUSE, op = "stmt_bind_null", message = strings.clone("statement is not open")}, false }
+	return bind_status(stmt, raw.turso_statement_bind_positional_null(stmt.handle, uint(position)), "stmt_bind_null")
+}
+
+stmt_bind_int :: proc(stmt: Statement, position: int, value: i64) -> (Error, bool) {
+	if stmt.handle == nil { return Error{code = .MISUSE, op = "stmt_bind_int", message = strings.clone("statement is not open")}, false }
+	return bind_status(stmt, raw.turso_statement_bind_positional_int(stmt.handle, uint(position), value), "stmt_bind_int")
+}
+
+stmt_bind_double :: proc(stmt: Statement, position: int, value: f64) -> (Error, bool) {
+	if stmt.handle == nil { return Error{code = .MISUSE, op = "stmt_bind_double", message = strings.clone("statement is not open")}, false }
+	return bind_status(stmt, raw.turso_statement_bind_positional_double(stmt.handle, uint(position), value), "stmt_bind_double")
+}
+
+// Turso copies the payload internally - caller does not need to extend value's lifetime.
+stmt_bind_text :: proc(stmt: Statement, position: int, value: string) -> (Error, bool) {
+	if stmt.handle == nil { return Error{code = .MISUSE, op = "stmt_bind_text", message = strings.clone("statement is not open")}, false }
+	ptr: [^]u8 = nil
+	if len(value) > 0 { ptr = raw_data(value) }
+	code := raw.turso_statement_bind_positional_text(stmt.handle, uint(position), ptr, uint(len(value)))
+	return bind_status(stmt, code, "stmt_bind_text")
+}
+
+stmt_bind_blob :: proc(stmt: Statement, position: int, value: []u8) -> (Error, bool) {
+	if stmt.handle == nil { return Error{code = .MISUSE, op = "stmt_bind_blob", message = strings.clone("statement is not open")}, false }
+	ptr: [^]u8 = nil
+	if len(value) > 0 { ptr = raw_data(value) }
+	code := raw.turso_statement_bind_positional_blob(stmt.handle, uint(position), ptr, uint(len(value)))
+	return bind_status(stmt, code, "stmt_bind_blob")
+}
+
+// stmt_param_position returns the 1-based position of a named parameter, or 0 if not found.
+// The name should include the SQL prefix (e.g. ":start", "?1", "$x").
+stmt_param_position :: proc(stmt: Statement, name: string) -> int {
+	if stmt.handle == nil || name == "" { return 0 }
+	c_name := strings.clone_to_cstring(name, context.allocator)
+	defer delete(c_name)
+	pos := raw.turso_statement_named_position(stmt.handle, c_name)
+	if pos <= 0 { return 0 }
+	return int(pos)
+}
+
+// stmt_param_name returns the name of the parameter at index (1-based), including the SQL prefix.
+// Returns "" for positional-only parameters or out-of-range indices.
+stmt_param_name :: proc(stmt: Statement, index: int, allocator := context.allocator) -> string {
+	if stmt.handle == nil || index <= 0 { return "" }
+	c_name := raw.turso_statement_parameter_name(stmt.handle, i64(index))
+	if c_name == nil { return "" }
+	out := strings.clone_from_cstring(c_name, allocator)
+	raw.turso_str_deinit(c_name)
+	return out
+}
+
+stmt_bind :: proc(stmt: Statement, position: int, arg: Bind_Arg) -> (Error, bool) {
+	switch arg.kind {
+	case .Null:   return stmt_bind_null(stmt, position)
+	case .Int:    return stmt_bind_int(stmt, position, arg.value.(i64))
+	case .Double: return stmt_bind_double(stmt, position, arg.value.(f64))
+	case .Text:   return stmt_bind_text(stmt, position, arg.value.(string))
+	case .Blob:   return stmt_bind_blob(stmt, position, arg.value.([]u8))
+	}
+	return Error{code = .MISUSE, op = "stmt_bind", message = strings.clone("unknown Bind_Kind")}, false
+}
+
+// stmt_bind_args binds positional arguments in order. Errors if more args than parameters.
+stmt_bind_args :: proc(stmt: Statement, args: ..Bind_Arg) -> (Error, bool) {
+	expected := parameters_count(stmt)
+	if i64(len(args)) > expected {
+		return Error{
+			code    = .MISUSE,
+			op      = "stmt_bind_args",
+			sql     = stmt.sql,
+			message = fmt.aprintf("too many bind args: got %d, max %d", len(args), expected),
+		}, false
+	}
+	for arg, i in args {
+		e, ok := stmt_bind(stmt, i + 1, arg)
+		if !ok { return e, false }
+	}
+	return error_none(), true
+}
+
+stmt_bind_named :: proc(stmt: Statement, name: string, arg: Bind_Arg) -> (Error, bool) {
+	pos := stmt_param_position(stmt, name)
+	if pos == 0 {
+		return Error{
+			code    = .MISUSE,
+			op      = "stmt_bind_named",
+			sql     = stmt.sql,
+			message = fmt.aprintf("named parameter not found: %q", name),
+		}, false
+	}
+	return stmt_bind(stmt, pos, arg)
+}
+
+stmt_bind_named_null   :: proc(stmt: Statement, name: string)               -> (Error, bool) { return stmt_bind_named(stmt, name, bind_null()) }
+stmt_bind_named_int    :: proc(stmt: Statement, name: string, v: i64)       -> (Error, bool) { return stmt_bind_named(stmt, name, bind_int(v)) }
+stmt_bind_named_double :: proc(stmt: Statement, name: string, v: f64)       -> (Error, bool) { return stmt_bind_named(stmt, name, bind_double(v)) }
+stmt_bind_named_text   :: proc(stmt: Statement, name: string, v: string)    -> (Error, bool) { return stmt_bind_named(stmt, name, bind_text(v)) }
+stmt_bind_named_blob   :: proc(stmt: Statement, name: string, v: []u8)      -> (Error, bool) { return stmt_bind_named(stmt, name, bind_blob(v)) }
