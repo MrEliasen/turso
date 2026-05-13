@@ -50,6 +50,10 @@ ALL_TESTS := [?]Test_Entry{
 
 	{"test_encryption_open_roundtrip", test_encryption_open_roundtrip},
 	{"test_encryption_wrong_key_fails", test_encryption_wrong_key_fails},
+	{"test_encryption_wal_checkpoint_and_reopen", test_encryption_wal_checkpoint_and_reopen},
+	{"test_encryption_plaintext_absent_in_file", test_encryption_plaintext_absent_in_file},
+
+	{"test_two_connections_share_state", test_two_connections_share_state},
 
 	{"test_async_io_basic_operations",     test_async_io_basic_operations},
 	{"test_async_io_step_iteration",       test_async_io_step_iteration},

@@ -70,7 +70,6 @@ curl_roundtrip :: proc(user_data: rawptr, req: sync_pkg.HTTP_Request, allocator:
 	if state.exit_code != 0 {
 		return {}, fmt.tprintf("curl: exit=%d stderr=%q", state.exit_code, string(stderr)), false
 	}
-	_ = stderr
 
 	status_str := strings.trim_space(string(stdout))
 	status_val, parsed := strconv.parse_int(status_str, 10)
