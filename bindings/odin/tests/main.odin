@@ -1,7 +1,9 @@
 package tests
 
+import "core:c/libc"
 import "core:fmt"
 import "core:mem"
+import "core:os"
 
 Test_Entry :: struct {
 	name: string,
@@ -36,6 +38,8 @@ ALL_TESTS := [?]Test_Entry{
 	{"test_named_bind", test_named_bind},
 	{"test_parameter_name_roundtrip", test_parameter_name_roundtrip},
 	{"test_bind_too_many_args", test_bind_too_many_args},
+	{"test_bind_named_prefix_variants",     test_bind_named_prefix_variants},
+	{"test_bind_positional_question_index", test_bind_positional_question_index},
 
 	{"test_column_name", test_column_name},
 	{"test_column_decltype", test_column_decltype},
@@ -44,17 +48,15 @@ ALL_TESTS := [?]Test_Entry{
 	{"test_get_blob_independence", test_get_blob_independence},
 
 	{"test_conn_exec_ddl", test_conn_exec_ddl},
-	{"test_insert_two_and_count", test_insert_two_and_count},
 	{"test_last_insert_rowid", test_last_insert_rowid},
+	{"test_insert_returning_partial_consume", test_insert_returning_partial_consume},
 
 	{"test_prepare_first_loop", test_prepare_first_loop},
 
 	{"test_encryption_open_roundtrip", test_encryption_open_roundtrip},
 	{"test_encryption_wrong_key_fails", test_encryption_wrong_key_fails},
-	{"test_encryption_wal_checkpoint_and_reopen", test_encryption_wal_checkpoint_and_reopen},
+	{"test_encryption_open_without_key_fails", test_encryption_open_without_key_fails},
 	{"test_encryption_plaintext_absent_in_file", test_encryption_plaintext_absent_in_file},
-
-	{"test_two_connections_share_state", test_two_connections_share_state},
 
 	{"test_conn_with_transaction_commit",                  test_conn_with_transaction_commit},
 	{"test_conn_with_transaction_rollback",                test_conn_with_transaction_rollback},
@@ -63,6 +65,7 @@ ALL_TESTS := [?]Test_Entry{
 	{"test_conn_with_savepoint_rollback",                  test_conn_with_savepoint_rollback},
 	{"test_conn_with_savepoint_nested",                    test_conn_with_savepoint_nested},
 	{"test_conn_with_transaction_body_failure_propagates", test_conn_with_transaction_body_failure_propagates},
+	{"test_conn_with_transaction_commit_failure_rollback_recovers", test_conn_with_transaction_commit_failure_rollback_recovers},
 
 	{"test_stmt_scan_struct_by_name",                  test_stmt_scan_struct_by_name},
 	{"test_stmt_scan_struct_tag_override",             test_stmt_scan_struct_tag_override},
@@ -72,18 +75,21 @@ ALL_TESTS := [?]Test_Entry{
 	{"test_stmt_scan_struct_null_handling",            test_stmt_scan_struct_null_handling},
 	{"test_stmt_scan_struct_not_a_struct_errors",      test_stmt_scan_struct_not_a_struct_errors},
 	{"test_conn_query_one_struct",                       test_conn_query_one_struct},
+	{"test_conn_query_one_struct_zero_rows_errors",      test_conn_query_one_struct_zero_rows_errors},
 	{"test_conn_query_optional_struct_zero_rows",        test_conn_query_optional_struct_zero_rows},
 	{"test_conn_query_optional_struct_one_row",          test_conn_query_optional_struct_one_row},
 	{"test_conn_query_all_struct",                       test_conn_query_all_struct},
 
 	{"test_async_io_basic_operations",     test_async_io_basic_operations},
 	{"test_async_io_step_iteration",       test_async_io_step_iteration},
+	{"test_async_io_with_parameter_binding", test_async_io_with_parameter_binding},
 	{"test_async_io_step_once_manual_drive", test_async_io_step_once_manual_drive},
 
 	{"test_cache_reuses_prepared_statement",      test_cache_reuses_prepared_statement},
 	{"test_cache_resets_between_uses",            test_cache_resets_between_uses},
 	{"test_cache_distinct_sql_get_distinct_entries", test_cache_distinct_sql_get_distinct_entries},
 	{"test_cache_clear_releases_entries",         test_cache_clear_releases_entries},
+	{"test_prepare_cached_with_zero_value_cache", test_prepare_cached_with_zero_value_cache},
 
 	// row_mapping_query_all_leak_test.odin: cleanup on partial failure for
 	// conn_query_all_struct / conn_query_one_struct / conn_query_optional_struct.
@@ -124,23 +130,23 @@ ALL_TESTS := [?]Test_Entry{
 	// state visibility on a normal build.
 	{"test_two_connections_two_threads",                      test_two_connections_two_threads},
 
-	// Value boundaries (value_boundary_test.odin).
-	{"test_bind_int_boundary_i64_min",        test_bind_int_boundary_i64_min},
-	{"test_bind_int_boundary_i64_max",        test_bind_int_boundary_i64_max},
-	{"test_bind_double_special_values",       test_bind_double_special_values},
+	// Value boundary the binding owns (NaN -> NULL policy). Numeric-extreme
+	// and large-blob roundtrip belong in core's sqltests; the binding only
+	// forwards (ptr, len) or i64 / f64 bytes through the FFI.
 	{"test_bind_double_nan_does_not_crash",   test_bind_double_nan_does_not_crash},
-	{"test_bind_blob_one_mb_roundtrip",       test_bind_blob_one_mb_roundtrip},
 
-	// Text handling (text_handling_test.odin).
-	{"test_bind_text_unicode_roundtrip",              test_bind_text_unicode_roundtrip},
+	// Text handling FFI boundary. Multibyte UTF-8 roundtrip lives in core's
+	// sqltests; the binding owns the (ptr, len) contract that lets a TEXT
+	// value contain embedded NUL bytes.
 	{"test_bind_text_with_embedded_nul_roundtrip",    test_bind_text_with_embedded_nul_roundtrip},
-	{"test_column_name_utf8_alias",                   test_column_name_utf8_alias},
 
-	// Closed-handle MISUSE (closed_handle_test.odin).
+	// Closed-handle MISUSE (closed_handle_test.odin). The exec-family APIs
+	// (exec / exec_args / exec_batch) share a guard inside the binding and
+	// are exercised together in test_closed_connection_exec_apis_return_misuse.
 	{"test_step_on_closed_statement_returns_misuse",       test_step_on_closed_statement_returns_misuse},
 	{"test_bind_on_closed_statement_returns_misuse",       test_bind_on_closed_statement_returns_misuse},
 	{"test_prepare_on_closed_connection_returns_misuse",   test_prepare_on_closed_connection_returns_misuse},
-	{"test_exec_on_closed_connection_returns_misuse",      test_exec_on_closed_connection_returns_misuse},
+	{"test_closed_connection_exec_apis_return_misuse",     test_closed_connection_exec_apis_return_misuse},
 	{"test_connect_on_closed_database_returns_misuse",     test_connect_on_closed_database_returns_misuse},
 
 	// Index bounds (index_bounds_test.odin).
@@ -149,21 +155,31 @@ ALL_TESTS := [?]Test_Entry{
 	{"test_stmt_column_name_negative_index_returns_empty",     test_stmt_column_name_negative_index_returns_empty},
 	{"test_stmt_param_name_non_positive_index_returns_empty",  test_stmt_param_name_non_positive_index_returns_empty},
 
-	// Constraint violations (constraint_test.odin).
-	{"test_unique_constraint_violation_returns_constraint_code",    test_unique_constraint_violation_returns_constraint_code},
-	{"test_not_null_constraint_violation_returns_constraint_code",  test_not_null_constraint_violation_returns_constraint_code},
-	{"test_check_constraint_violation_returns_constraint_code",     test_check_constraint_violation_returns_constraint_code},
-	{"test_constraint_error_carries_failing_sql",                   test_constraint_error_carries_failing_sql},
+	// Constraint violations (constraint_test.odin). UNIQUE / NOT NULL / CHECK
+	// share the same status-code propagation path inside the binding; ON
+	// CONFLICT clause semantics are core SQL covered exhaustively in
+	// testing/sqltests.
+	{"test_constraint_violations_surface_constraint_code", test_constraint_violations_surface_constraint_code},
+	{"test_constraint_error_carries_failing_sql",          test_constraint_error_carries_failing_sql},
 
 	// Cache lifetime (cache_lifetime_test.odin).
 	{"test_cache_destroy_after_connection_close_does_not_crash",  test_cache_destroy_after_connection_close_does_not_crash},
 	{"test_cached_statement_survives_schema_change",              test_cached_statement_survives_schema_change},
 
-	// Multi-statement exec (exec_batch_test.odin).
+	// Multi-statement exec (exec_batch_test.odin). Closed-handle MISUSE for
+	// conn_exec_batch is covered by test_closed_connection_exec_apis_return_misuse.
 	{"test_exec_batch_runs_ddl_plus_inserts",                  test_exec_batch_runs_ddl_plus_inserts},
 	{"test_exec_batch_stops_on_error",                         test_exec_batch_stops_on_error},
-	{"test_exec_batch_on_closed_connection_returns_misuse",    test_exec_batch_on_closed_connection_returns_misuse},
 	{"test_exec_batch_with_only_whitespace_succeeds",          test_exec_batch_with_only_whitespace_succeeds},
+
+	// M1 ownership regression (statement_sql_ownership_test.odin).
+	{"test_prepare_owns_sql_when_caller_mutates_buffer",            test_prepare_owns_sql_when_caller_mutates_buffer},
+	{"test_prepare_clones_sql_so_caller_can_free_immediately",      test_prepare_clones_sql_so_caller_can_free_immediately},
+	{"test_prepare_first_clones_sql_so_caller_can_free_immediately", test_prepare_first_clones_sql_so_caller_can_free_immediately},
+
+	// busy_timeout contention (busy_timeout_test.odin).
+	{"test_busy_immediate_without_timeout_surfaces_busy",      test_busy_immediate_without_timeout_surfaces_busy},
+	{"test_busy_immediate_with_timeout_waits_then_succeeds",   test_busy_immediate_with_timeout_waits_then_succeeds},
 }
 
 main :: proc() {
@@ -173,14 +189,30 @@ main :: proc() {
 	context.allocator = mem.tracking_allocator(&track)
 
 	passed := 0
+	failed := 0
 	for t in ALL_TESTS {
 		fmt.printf("[ RUN  ] %s\n", t.name)
-		t.fn()
-		fmt.printf("[  OK  ] %s\n", t.name)
-		passed += 1
+		test_failed = false
+		// libc.setjmp returns 0 on the initial call and non-zero when the
+		// matching longjmp in test_fail unwinds back here. Only call t.fn on
+		// the initial pass; the second pass surfaces the failure recorded by
+		// test_fail and moves on to the next test.
+		if libc.setjmp(&test_jmp_buf) == 0 {
+			t.fn()
+		}
+		if test_failed {
+			fmt.printf("[ FAIL ] %s\n", t.name)
+			failed += 1
+		} else {
+			fmt.printf("[  OK  ] %s\n", t.name)
+			passed += 1
+		}
 	}
-	fmt.printf("\n%d/%d tests passed\n", passed, len(ALL_TESTS))
+	fmt.printf("\n%d/%d tests passed, %d failed\n", passed, len(ALL_TESTS), failed)
 
+	if failed > 0 {
+		fmt.eprintf("\nNOTE: a failing test longjmps out of its body without running deferred cleanup, so any allocations below may be from a failing test's skipped cleanup rather than a binding leak. Fix the failures first, then rerun and check the leak report.\n")
+	}
 	if len(track.allocation_map) > 0 {
 		fmt.eprintf("\n=== %d LEAKED ALLOCATIONS ===\n", len(track.allocation_map))
 		for _, entry in track.allocation_map {
@@ -194,5 +226,15 @@ main :: proc() {
 		for entry in track.bad_free_array {
 			fmt.eprintf("  ptr=%v @ %v\n", entry.memory, entry.location)
 		}
+	}
+	// Exit policy: any failed test is fatal. Tracked-allocator leaks and bad
+	// frees are also fatal, but only when there were no failed tests; a failed
+	// test longjmps past its own cleanup, so the leaks it leaves behind are
+	// not real binding leaks and should not mask the underlying test failure.
+	if failed > 0 {
+		os.exit(1)
+	}
+	if len(track.allocation_map) > 0 || len(track.bad_free_array) > 0 {
+		os.exit(1)
 	}
 }

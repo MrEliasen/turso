@@ -16,14 +16,18 @@ Connection :: struct {
 }
 
 // Statement is a prepared statement. Always pair with finalize.
-// sql is borrowed from the caller's allocation when the Statement was returned
-// by `prepare` or `prepare_first`; in that case the caller must keep the SQL
-// string alive at least until any error returns are inspected. When the
-// Statement was returned by `prepare_cached`, sql aliases the cache's own
-// owned copy of the key, so it remains valid for as long as the entry is in
-// the cache. Either way, do not free `sql` directly.
+//
+// sql is owned by the Statement: `prepare` and `prepare_first` clone the
+// caller's SQL into a new allocation, and `finalize` frees it. Callers are
+// therefore free to throw away their own SQL buffer (e.g. a stack-local
+// fmt.tprintf result) the moment prepare returns. For statements obtained
+// via `prepare_cached`, `sql` aliases the cache's own copy of the key and
+// lives until cache_destroy / cache_clear; do not finalize cached statements
+// directly.
 Statement :: struct {
 	handle: raw.Statement_Ptr,
+	// db is informational only - the binding never reads it. Reserved for
+	// future use; consumers should not rely on the value.
 	db:     raw.Database_Ptr,
 	sql:    string,
 }

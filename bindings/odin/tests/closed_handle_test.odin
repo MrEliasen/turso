@@ -45,15 +45,40 @@ test_prepare_on_closed_connection_returns_misuse :: proc() {
 	expect_eq(e.code, turso.Status_Code.MISUSE, "prepare on closed connection surfaces MISUSE")
 }
 
-test_exec_on_closed_connection_returns_misuse :: proc() {
-	t := test_db_open_memory()
-	_, _ = turso.conn_close(&t.conn)
-	defer test_db_close(&t)
+// test_closed_connection_exec_apis_return_misuse drives every exec-family API
+// through the closed-connection path in one parametric run. The exec APIs
+// (conn_exec, conn_exec_args, conn_exec_batch) share the same handle-nil guard
+// inside the binding; the test pins that surface for all three so a future
+// guard regression on any of them is caught.
+test_closed_connection_exec_apis_return_misuse :: proc() {
+	cases := [?]struct{
+		name: string,
+		call: proc(conn: turso.Connection) -> (turso.Error, bool),
+	}{
+		{"conn_exec", proc(conn: turso.Connection) -> (turso.Error, bool) {
+			_, e, ok := turso.conn_exec(conn, "SELECT 1")
+			return e, ok
+		}},
+		{"conn_exec_args", proc(conn: turso.Connection) -> (turso.Error, bool) {
+			_, e, ok := turso.conn_exec_args(conn, "SELECT ?", turso.bind_int(1))
+			return e, ok
+		}},
+		{"conn_exec_batch", proc(conn: turso.Connection) -> (turso.Error, bool) {
+			_, e, ok := turso.conn_exec_batch(conn, "CREATE TABLE x(v)")
+			return e, ok
+		}},
+	}
 
-	_, e, ok := turso.conn_exec(t.conn, "SELECT 1")
-	defer turso.error_destroy(&e)
-	expect_false(ok, "conn_exec on closed connection must fail")
-	expect_eq(e.code, turso.Status_Code.MISUSE, "conn_exec on closed connection surfaces MISUSE")
+	for tc in cases {
+		t := test_db_open_memory()
+		_, _ = turso.conn_close(&t.conn)
+		defer test_db_close(&t)
+
+		e, ok := tc.call(t.conn)
+		defer turso.error_destroy(&e)
+		expect_false(ok, tc.name)
+		expect_eq(e.code, turso.Status_Code.MISUSE, tc.name)
+	}
 }
 
 test_connect_on_closed_database_returns_misuse :: proc() {

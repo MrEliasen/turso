@@ -1,60 +1,63 @@
 package tests
 
+import "core:fmt"
 import turso "../turso"
 
-// Constraint-violation tests. The Java JDBC suite covers UNIQUE/CHECK/NOT NULL
-// constraints individually; the Rust binding's test_concurrent_unique_constraint_regression
-// is the canonical reference for how constraint errors should surface in Turso.
-// These tests pin the same surface for the Odin binding without spinning up
-// concurrent workers.
+// Constraint-violation propagation. The binding's role is to forward the
+// engine-supplied CONSTRAINT status code intact and to carry the failing SQL
+// in the Error so the caller can diagnose. Core Turso's sqltests cover the
+// SQL semantics of UNIQUE / NOT NULL / CHECK / ON CONFLICT clauses
+// exhaustively; the binding only needs to prove the propagation path once
+// per trigger shape.
 
-test_unique_constraint_violation_returns_constraint_code :: proc() {
-	t := test_db_open_memory()
-	defer test_db_close(&t)
-
-	exec_ok(t.conn, "CREATE TABLE u(id INTEGER PRIMARY KEY, email TEXT UNIQUE)")
-	exec_ok(t.conn, "INSERT INTO u(email) VALUES ('a@example.com')")
-
-	_, e, ok := turso.conn_exec_args(
-		t.conn,
-		"INSERT INTO u(email) VALUES (?)",
-		turso.bind_text("a@example.com"),
-	)
-	defer turso.error_destroy(&e)
-	expect_false(ok, "duplicate UNIQUE value must fail")
-	expect_eq(e.code, turso.Status_Code.CONSTRAINT, "UNIQUE violation surfaces CONSTRAINT")
+@(private)
+Constraint_Case :: struct {
+	name:        string,
+	ddl:         string,
+	insert_sql:  string,
+	bind_arg:    turso.Bind_Arg,
 }
 
-test_not_null_constraint_violation_returns_constraint_code :: proc() {
-	t := test_db_open_memory()
-	defer test_db_close(&t)
+// test_constraint_violations_surface_constraint_code is parametric: one
+// driver, three rows, each exercising a different engine-side trigger but
+// hitting the same status-code propagation surface in the binding.
+test_constraint_violations_surface_constraint_code :: proc() {
+	cases := [?]Constraint_Case{
+		{
+			name       = "UNIQUE",
+			ddl        = "CREATE TABLE u(id INTEGER PRIMARY KEY, email TEXT UNIQUE)",
+			insert_sql = "INSERT INTO u(email) VALUES (?)",
+			bind_arg   = turso.bind_text("a@example.com"),
+		},
+		{
+			name       = "NOT NULL",
+			ddl        = "CREATE TABLE n(id INTEGER PRIMARY KEY, label TEXT NOT NULL)",
+			insert_sql = "INSERT INTO n(label) VALUES (?)",
+			bind_arg   = turso.bind_null(),
+		},
+		{
+			name       = "CHECK",
+			ddl        = "CREATE TABLE c(id INTEGER PRIMARY KEY, age INTEGER CHECK(age >= 0))",
+			insert_sql = "INSERT INTO c(age) VALUES (?)",
+			bind_arg   = turso.bind_int(-1),
+		},
+	}
 
-	exec_ok(t.conn, "CREATE TABLE n(id INTEGER PRIMARY KEY, label TEXT NOT NULL)")
+	for tc in cases {
+		t := test_db_open_memory()
+		defer test_db_close(&t)
 
-	_, e, ok := turso.conn_exec_args(
-		t.conn,
-		"INSERT INTO n(label) VALUES (?)",
-		turso.bind_null(),
-	)
-	defer turso.error_destroy(&e)
-	expect_false(ok, "NULL into NOT NULL column must fail")
-	expect_eq(e.code, turso.Status_Code.CONSTRAINT, "NOT NULL violation surfaces CONSTRAINT")
-}
+		exec_ok(t.conn, tc.ddl)
+		if tc.name == "UNIQUE" {
+			// UNIQUE needs a prior row to collide against.
+			exec_ok(t.conn, "INSERT INTO u(email) VALUES ('a@example.com')")
+		}
 
-test_check_constraint_violation_returns_constraint_code :: proc() {
-	t := test_db_open_memory()
-	defer test_db_close(&t)
-
-	exec_ok(t.conn, "CREATE TABLE c(id INTEGER PRIMARY KEY, age INTEGER CHECK(age >= 0))")
-
-	_, e, ok := turso.conn_exec_args(
-		t.conn,
-		"INSERT INTO c(age) VALUES (?)",
-		turso.bind_int(-1),
-	)
-	defer turso.error_destroy(&e)
-	expect_false(ok, "CHECK constraint must reject negative age")
-	expect_eq(e.code, turso.Status_Code.CONSTRAINT, "CHECK violation surfaces CONSTRAINT")
+		_, e, ok := turso.conn_exec_args(t.conn, tc.insert_sql, tc.bind_arg)
+		defer turso.error_destroy(&e)
+		expect_false(ok, fmt.tprintf("%s violation must fail", tc.name))
+		expect_eq(e.code, turso.Status_Code.CONSTRAINT, fmt.tprintf("%s violation surfaces CONSTRAINT", tc.name))
+	}
 }
 
 // The Error retains the failing SQL so the caller can inspect what was tried.

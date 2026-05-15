@@ -1,5 +1,6 @@
 package tests
 
+import "core:c/libc"
 import "core:fmt"
 import "core:os"
 import "core:path/filepath"
@@ -11,9 +12,23 @@ Test_DB :: struct {
 	path: string,  // "" for in-memory
 }
 
+// Test runner state. test_fail records the failure and longjmps back to the
+// per-test setjmp landing pad in main, so the runner can surface the failure,
+// move on to the next test, and still print the tracking allocator's leak
+// report at the end. The test body's defers do not run on longjmp; the
+// runner notes this in the final report so a noisy leak listing on a failing
+// run is not mistaken for a binding regression.
+//
+// Threads spawned by a test must be joined before any expect_* in the test
+// body, otherwise the longjmp leaves them running across the next test's
+// setup.
+test_jmp_buf: libc.jmp_buf
+test_failed:  bool
+
 test_fail :: proc(loc := #caller_location, format: string = "", args: ..any) -> ! {
+	test_failed = true
 	fmt.eprintf("[FAIL] %s:%d %s\n", loc.file_path, loc.line, fmt.tprintf(format, ..args))
-	os.exit(1)
+	libc.longjmp(&test_jmp_buf, 1)
 }
 
 expect_true :: proc(v: bool, msg: string, loc := #caller_location) {
@@ -95,7 +110,8 @@ prep_ok :: proc(conn: turso.Connection, sql: string, loc := #caller_location) ->
 }
 
 finalize_ok :: proc(stmt: ^turso.Statement, loc := #caller_location) {
-	_, _ = turso.finalize(stmt)
+	fe, _ := turso.finalize(stmt)
+	turso.error_destroy(&fe)
 }
 
 step_expect_row :: proc(stmt: turso.Statement, loc := #caller_location) {

@@ -56,7 +56,10 @@ main :: proc() {
 		if r != .Row { break }
 		id := turso.stmt_get_int(stmt, 0)
 		name := turso.stmt_get_text(stmt, 1)
-		defer delete(name)
 		fmt.printfln("  row id=%d name=%q", id, name)
+		// Odin's defer is procedure-scoped, so a `defer delete(name)` here
+		// would queue one cleanup per row and hold every string until main()
+		// exits. Free explicitly each iteration instead.
+		delete(name)
 	}
 }

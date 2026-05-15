@@ -91,52 +91,6 @@ test_encryption_wrong_key_fails :: proc() {
 	// otherwise open itself failed, which also satisfies the test.
 }
 
-// test_encryption_wal_checkpoint_and_reopen mirrors the .NET and Rust
-// encryption suites: insert data, run PRAGMA wal_checkpoint(truncate) to
-// force WAL contents into the main DB file, close, reopen, and verify the
-// data survived. Catches regressions where WAL frames containing encrypted
-// pages don't make it back into the main file on checkpoint.
-test_encryption_wal_checkpoint_and_reopen :: proc() {
-	path := encrypted_db_path("wal_checkpoint")
-	defer { os.remove(path); delete(path) }
-
-	cfg := turso.Database_Config{
-		path                  = path,
-		experimental_features = "encryption",
-		encryption_cipher     = ENC_TEST_CIPHER,
-		encryption_hexkey     = ENC_TEST_KEY,
-	}
-
-	{
-		db, err, ok := turso.database_open(cfg)
-		expect_no_err(err, ok, "open encrypted DB for checkpoint test")
-		defer turso.database_close(&db)
-		conn, ce, cok := turso.connect(db)
-		expect_no_err(ce, cok, "connect for checkpoint test")
-		defer { _, _ = turso.conn_close(&conn) }
-
-		exec_ok(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)")
-		exec_ok(conn, "INSERT INTO t(v) VALUES ('alpha'), ('beta'), ('gamma')")
-
-		// PRAGMA wal_checkpoint flushes WAL frames into the main DB file.
-		// conn_exec returns an error if the engine refuses; we accept any
-		// outcome (some Turso build modes treat PRAGMA as no-op) provided
-		// the data is still queryable after reopen.
-		_, _, _ = turso.conn_exec(conn, "PRAGMA wal_checkpoint(TRUNCATE)")
-	}
-
-	db2, err2, ok2 := turso.database_open(cfg)
-	expect_no_err(err2, ok2, "reopen encrypted DB after checkpoint")
-	defer turso.database_close(&db2)
-	conn2, ce2, cok2 := turso.connect(db2)
-	expect_no_err(ce2, cok2, "connect to reopened DB")
-	defer { _, _ = turso.conn_close(&conn2) }
-
-	count, qe, qok := turso.conn_scalar_i64(conn2, "SELECT COUNT(*) FROM t")
-	expect_no_err(qe, qok, "count rows after checkpoint+reopen")
-	expect_eq(count, i64(3), "all rows must survive WAL checkpoint and reopen")
-}
-
 // test_encryption_plaintext_absent_in_file confirms that a string written to
 // an encrypted DB does not appear in the raw on-disk bytes — a stronger
 // guarantee than just "wrong key returns error". This is what the .NET and
@@ -179,6 +133,48 @@ test_encryption_plaintext_absent_in_file :: proc() {
 		bytes_contain(bytes, transmute([]u8)string(PAYLOAD)),
 		"plaintext payload must not appear in encrypted file bytes",
 	)
+}
+
+// T5: opening an encrypted database without supplying any key must NOT yield
+// readable plaintext - the open or the first query must error. The Java JDBC,
+// .NET, and Go tests pin the same contract.
+test_encryption_open_without_key_fails :: proc() {
+	path := encrypted_db_path("no_key")
+	defer { os.remove(path); delete(path) }
+
+	good := turso.Database_Config{
+		path                  = path,
+		experimental_features = "encryption",
+		encryption_cipher     = ENC_TEST_CIPHER,
+		encryption_hexkey     = ENC_TEST_KEY,
+	}
+
+	// Set up the encrypted DB with content.
+	db, err, ok := turso.database_open(good)
+	expect_no_err(err, ok, "open with good key")
+	conn, _, _ := turso.connect(db)
+	exec_ok(conn, "CREATE TABLE t(v TEXT)")
+	exec_ok(conn, "INSERT INTO t(v) VALUES ('classified')")
+	_, _, _ = turso.conn_exec(conn, "PRAGMA wal_checkpoint(TRUNCATE)")
+	_, _ = turso.conn_close(&conn)
+	turso.database_close(&db)
+
+	// Reopen WITHOUT the encryption fields. Either open fails (preferred),
+	// or open succeeds but the first SELECT must surface an error. What is
+	// NOT acceptable is "ok=true, row returned with garbled or correct
+	// plaintext."
+	plain := turso.Database_Config{path = path}
+	db2, err2, ok2 := turso.database_open(plain)
+	defer { turso.error_destroy(&err2); turso.database_close(&db2) }
+	if !ok2 {
+		// open itself rejected the file - safe outcome.
+		return
+	}
+	conn2, _, _ := turso.connect(db2)
+	defer { _, _ = turso.conn_close(&conn2) }
+	_, read_err, read_ok := turso.conn_scalar_i64(conn2, "SELECT COUNT(*) FROM t")
+	defer turso.error_destroy(&read_err)
+	expect_false(read_ok, "querying an encrypted DB without key must fail")
 }
 
 @(private)

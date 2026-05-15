@@ -117,6 +117,13 @@ error_string :: proc(err: Error, allocator := context.allocator) -> string {
 // material the binding materialised on the heap (encryption key, auth token).
 // Caller must have allocated the cstring via context.allocator; a nil pointer
 // is a no-op so it composes cleanly with the existing `defer if c != nil` idiom.
+//
+// @(private) because the implementation scans forward until the trailing NUL.
+// Internal callers always pass `strings.clone_to_cstring` output which is
+// guaranteed NUL-terminated; an external caller passing a raw cstring without
+// that guarantee would trigger an out-of-bounds read. For Odin `string`
+// callers, use the length-bearing delete_zeroed_string instead.
+@(private)
 delete_zeroed_cstring :: proc(s: cstring) {
 	if s == nil { return }
 	bytes := transmute([^]u8)s

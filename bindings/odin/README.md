@@ -151,9 +151,31 @@ main :: proc() {
 - `stmt_column_name`, `stmt_column_decltype`, `stmt_param_name` return owned strings (we copy and free the C original internally). Free with `delete(...)`.
 - `Error.message` AND `Error.sql` are owned by the Error (cloned at construction). Call `error_destroy(&err)` to free both. `Error.ctx` is borrowed (caller's static literal).
 - `bind_text` / `bind_blob` payloads are copied by Turso during the call - caller's data does not need to outlive the bind.
-- `encryption_hexkey` in `Database_Config` is NOT copied or scrubbed by the binding. If you need the key wiped after `database_open` returns, allocate it yourself and zero the buffer after the call.
+- `encryption_hexkey` in `Database_Config`: the binding internally clones the value into a C-string for the FFI call and scrubs that internal copy before freeing. Your original `Database_Config.encryption_hexkey` buffer is untouched; allocate the source as a heap string and zero it yourself after `database_open` returns if you need the key wiped end to end.
 - **Cleanup ordering**: finalize every `Statement` (or `cache_destroy` the cache that owns them) BEFORE you `conn_close` the source connection, and `conn_close` every `Connection` BEFORE you `database_close` the source database. Engine handles point into resources that the parent owns; reversing the order is undefined behavior per `sdk-kit/turso.h:194`.
+- **Statement cache lifetime**: always call `cache_destroy` on every `Stmt_Cache` before `conn_close` on the connection that minted the cached statements. Closing the connection first leaves the cache pointing at freed engine state. See [tests/cache_lifetime_test.odin](tests/cache_lifetime_test.odin) for the regression pin.
 - `conn_exec` and `conn_exec_args` compile only the first statement; trailing text is discarded silently. Use `conn_exec_batch` to run a multi-statement script.
+- **Odin `defer` is procedure-scoped (LIFO at proc exit), not block-scoped**: `defer delete(x)` inside a `for` loop queues one deferred call per iteration and runs them all at proc exit. For long-running iterations (rows from a SELECT, columns from a wide row) call `delete` explicitly at end of loop body so memory peaks at one allocation, not N.
+- **Transaction COMMIT semantics**: `conn_with_transaction` runs a best-effort ROLLBACK if COMMIT fails, so the connection is not left in an open-transaction state. The error you receive is always the original COMMIT error; any failure during the rescue ROLLBACK is swallowed because the COMMIT-side error is the actionable signal.
+
+## Coming from other Turso bindings
+
+The Odin binding's vocabulary mirrors the sibling bindings, just adapted to Odin's value-type and multi-return idioms. Pick the row for the binding you already know:
+
+| Operation        | Go (`database/sql`)                       | Rust (`turso`)                    | Python (`turso`)               | Odin (`turso`)                                            |
+|------------------|-------------------------------------------|-----------------------------------|--------------------------------|-----------------------------------------------------------|
+| Open             | `sql.Open("turso", path)`                 | `Builder::new_local(path).build()`| `turso.connect(path)`          | `turso.database_open(Database_Config{path = path})`        |
+| Connect          | implicit per `Stmt`/`Tx`                  | `db.connect()`                    | `conn` is the connection        | `turso.connect(db)`                                       |
+| Prepare          | `db.Prepare(sql)`                         | `conn.prepare(sql).await`         | `cursor.execute(sql, ...)`      | `turso.prepare(conn, sql)`                                |
+| Bind             | `stmt.Exec(args...)`                      | params trait + `stmt.execute`     | second arg of `execute`         | `turso.stmt_bind_args(stmt, ..args)` or `bind_text/int/...` |
+| Iterate rows     | `for rows.Next() { rows.Scan(&a, &b) }`   | `while let Some(r) = rows.next()` | `cursor.fetchone()`             | `for { r, _, _ := turso.step(stmt); if r != .Row { break }; ... }` |
+| Single scalar    | `db.QueryRow(...).Scan(&v)`               | `conn.query_row(sql, ...)`        | `cursor.fetchone()`             | `turso.conn_scalar_i64(conn, sql, ...)`                   |
+| Map row → struct | manual `rows.Scan(...)`                   | `serde_rusqlite`, etc.            | row factory                    | `turso.conn_query_one_struct(conn, sql, &out)`            |
+| Transaction      | `db.BeginTx(...).Commit()`                | `conn.transaction().commit()`     | `with conn: ...`                | `turso.conn_with_transaction(conn, body)`                 |
+| Close            | `db.Close()`                              | drop                              | `conn.close()`                  | `turso.database_close(&db)` / `turso.conn_close(&conn)`   |
+| Error            | `err error`                               | `Result<T>`                       | `turso.DatabaseError`          | `(value, turso.Error, bool)` triple                       |
+
+The recurring shape is `(value, Error, bool)`: inspect `ok` first, then either consume `value` or report `Error`. Free the error's owned strings with `turso.error_destroy(&err)`.
 
 ## Threading
 
@@ -166,6 +188,30 @@ Per `sdk-kit/turso.h`:
 Every fallible proc returns `(Value, Error, bool)`. Inspect `ok` first; on failure call `turso.error_string(err)` for a formatted diagnostic and `turso.error_destroy(&err)` to release the owned strings.
 
 `Error` is a struct of `code` (Turso status code), `message` (owned string from C, or empty), `sql` (owned; the failing SQL if known), `op` (static call-site label), and `ctx` (borrowed caller-supplied context). `error_destroy` frees `message` AND `sql`.
+
+## Transaction helpers
+
+The binding ships block-scoped wrappers on top of the BEGIN / COMMIT / ROLLBACK / SAVEPOINT / RELEASE primitives. Use them when you want the cleanup to be automatic on every path; reach for the underlying `conn_begin` / `conn_commit` / `conn_rollback` when you need finer control.
+
+```odin
+err, ok := turso.conn_with_transaction(conn, proc(c: turso.Connection) -> bool {
+    if _, _, iok := turso.conn_exec_args(c, "INSERT INTO t(v) VALUES (?)", turso.bind_int(1)); !iok {
+        return false  // false rolls back
+    }
+    return true       // true commits
+})
+if !ok {
+    fmt.eprintln(turso.error_string(err))
+    turso.error_destroy(&err)
+}
+```
+
+- **Body return value drives the outcome.** `true` runs COMMIT, `false` runs ROLLBACK. The wrapper never inspects errors emitted inside the body; the body decides.
+- **BEGIN failure short-circuits.** If `BEGIN` itself fails (eg the connection is closed or already in a transaction), the body is never called and the wrapper returns the BEGIN error.
+- **COMMIT failure runs a best-effort ROLLBACK.** When the body returned `true` and `COMMIT` fails (deferred FK violations, deferred CHECK, BUSY/FULL/IOERR depending on engine path), the wrapper issues a follow-up `ROLLBACK` so the caller is not stuck inside an indeterminate open transaction. The surfaced error is always the original COMMIT failure; a failed rescue ROLLBACK is swallowed because COMMIT is the actionable signal. The regression pin is [tests/transaction_test.odin](tests/transaction_test.odin) (`test_conn_with_transaction_commit_failure_rollback_recovers`).
+- **Body-driven ROLLBACK surfaces its own error.** When the body returns `false` and the wrapper runs ROLLBACK, any failure from that ROLLBACK becomes the wrapper's return value rather than being silently swallowed. A failed manual rollback leaves the transaction in an unknown state that the caller needs to know about.
+- **Savepoints** follow the same pattern through `conn_with_savepoint(conn, name, body)`. `true` runs `RELEASE name`; `false` runs `ROLLBACK TO name` followed by `RELEASE name` (per SQLite semantics, `ROLLBACK TO` does not pop the savepoint, so the explicit RELEASE keeps the stack tidy). The first non-OK error wins. Savepoint names are double-quoted at the SQL boundary and reject embedded NUL bytes up front.
+- **Nested savepoints** compose naturally: the outer wrapper releases its savepoint, the inner one rolls back, and only the inner's writes are discarded. See `test_conn_with_savepoint_nested` in [tests/transaction_test.odin](tests/transaction_test.odin).
 
 ## Sync engine
 
@@ -230,6 +276,21 @@ Sync ownership rules:
 - `Sync_Changes` returned by `pull`'s wait phase is **consumed** by `apply_changes` (the wrapper handles this internally). A trailing `sync.changes_close` is a no-op.
 - `Stats.revision` is an owned string; free with `sync.stats_destroy(&stats)` or `delete(stats.revision)`.
 - `auth_token` may be set either on `sync.Config` or on `HTTP_Client`. `sync.Config.auth_token` takes precedence; when it's empty the dispatcher falls back to `HTTP_Client.auth_token`. The non-nil value is injected as `Authorization: Bearer <token>` on every request. The token is static for the life of the `Sync_Database`; rotate by opening a fresh one.
+
+## Performance & tuning
+
+Most knobs are compile-time constants because the cost of a runtime knob (an extra field on a config struct) is more invasive than the win. Override by editing the source and rebuilding; if you need a knob to be user-configurable, file an issue.
+
+| Constant                         | Location                              | Default        | What it controls |
+|----------------------------------|---------------------------------------|----------------|------------------|
+| `STACK_COLS`                     | `turso/row_mapping.odin:52`           | `64`           | Column count below which `stmt_scan_struct` keeps its scratch plan on the stack. Wider rows fall back to `context.temp_allocator`. |
+| `LOGGER_SEQLOCK_MAX_RETRIES`     | `turso/setup.odin:62`                 | `8`            | Reader-side spin cap for the global setup-context seqlock. After the cap is hit the log event is dropped. |
+| `HTTP_PUSH_CHUNK_SIZE`           | `turso/sync/io_loop.odin:176`         | `64 * 1024`    | Maximum bytes pushed to the sync engine in a single `turso_sync_database_io_push_buffer` call. Prevents one-shot 200 MB allocations on a bootstrap pull. |
+| `CONNECT_TIMEOUT_SECONDS`        | `turso/sync/curlhttp/curl_http.odin:37` | `10`         | curl `CURLOPT_CONNECTTIMEOUT` for the built-in libcurl client. |
+| `REQUEST_TIMEOUT_SECONDS`        | `turso/sync/curlhttp/curl_http.odin:38` | `60`         | curl `CURLOPT_TIMEOUT` (overall wall clock per call) for the built-in libcurl client. |
+| `MAX_RESPONSE_BYTES`             | `turso/sync/curlhttp/curl_http.odin`  | `256 MiB`      | Hard cap on response body size to defend against malicious or misbehaving remotes streaming unbounded data. |
+
+The statement cache is opt-in (`prepare_cached`); on hot paths it elides the per-call parse/plan cost in exchange for one allocation at insert time. Use it for queries you run more than a few times.
 
 ## Source of truth
 

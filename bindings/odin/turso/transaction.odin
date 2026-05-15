@@ -85,12 +85,19 @@ conn_rollback_to :: proc(conn: Connection, name: string) -> (Error, bool) {
 
 // conn_with_transaction wraps `body` between BEGIN and COMMIT/ROLLBACK.
 // Returns true to commit, false to roll back. If BEGIN fails the body is
-// never called. If COMMIT fails after a successful body, the surfaced error
-// is the commit error and the transaction has been rolled back implicitly
-// by the engine.
+// never called.
+//
+// COMMIT failure handling: depending on the underlying error (BUSY, FULL,
+// IOERR, deferred constraint, ...) the engine may or may not have auto-rolled
+// back. We do not want to leave the caller staring at a connection in an
+// indeterminate transaction state, so on COMMIT failure the wrapper issues a
+// best-effort ROLLBACK. If that ROLLBACK fails (typical case: the engine
+// already rolled back, so "no transaction is active"), the secondary error is
+// discarded and the original commit error is what propagates to the caller -
+// that is the actionable signal.
 //
 // When the body returns false the wrapper runs ROLLBACK eagerly and surfaces
-// any error from it rather than swallowing — a rollback that fails leaves
+// any error from it rather than swallowing - a rollback that fails leaves
 // the transaction in an unknown state, which the caller needs to know about.
 conn_with_transaction :: proc(conn: Connection, body: proc(conn: Connection) -> bool) -> (Error, bool) {
 	if e, ok := conn_begin(conn); !ok { return e, false }
@@ -99,8 +106,12 @@ conn_with_transaction :: proc(conn: Connection, body: proc(conn: Connection) -> 
 		return conn_rollback(conn)
 	}
 
-	e, ok := conn_commit(conn)
-	if !ok { return e, false }
+	commit_err, commit_ok := conn_commit(conn)
+	if !commit_ok {
+		rb_err, _ := conn_rollback(conn)
+		error_destroy(&rb_err)
+		return commit_err, false
+	}
 	return error_none(), true
 }
 

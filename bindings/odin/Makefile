@@ -4,16 +4,23 @@ SHELL := /bin/sh
 WORKSPACE      := ../..
 SDK_KIT_TARGET := $(WORKSPACE)/target/debug
 
+# Release-profile output. Used by the *-release targets below for downstream
+# users who want a tuned binding (the on-repo dev workflow uses debug per
+# CLAUDE.md; release is for shipping).
+SDK_KIT_TARGET_RELEASE := $(WORKSPACE)/target/release
+
 UNAME := $(shell uname -s)
 ifeq ($(UNAME),Darwin)
   LIB_FILE      := libturso_sdk_kit.dylib
   LIB_SYNC_FILE := libturso_sync_sdk_kit.dylib
   RPATH         := @loader_path/../../target/debug
+  RPATH_RELEASE := @loader_path/../../target/release
 endif
 ifeq ($(UNAME),Linux)
   LIB_FILE      := libturso_sdk_kit.so
   LIB_SYNC_FILE := libturso_sync_sdk_kit.so
   RPATH         := $$ORIGIN/../../target/debug
+  RPATH_RELEASE := $$ORIGIN/../../target/release
 endif
 
 # Linker flags: link search path + baked-in rpath so the binary loads the dylib
@@ -28,31 +35,45 @@ ODIN_FLAGS      := -extra-linker-flags:"$(ODIN_LINK_FLAGS)"
 # both libs would split turso_core state and crash on cross-lib pointer use.
 ODIN_SYNC_FLAGS := $(ODIN_FLAGS) -define:TURSO_USE_SYNC_DYLIB=true
 
-.PHONY: help sdk-kit sync-sdk-kit check test sync-test stress-test tsan-test example examples clean
+.PHONY: help sdk-kit sdk-kit-release sync-sdk-kit sync-sdk-kit-release check test sync-test stress-test tsan-test example examples clean
 
 help:
 	@echo "Targets:"
-	@echo "  sdk-kit       Build the local-DB C ABI library (debug profile) via cargo"
-	@echo "  sync-sdk-kit  Build the sync-engine C ABI library (debug profile) via cargo"
-	@echo "  check         odin check on turso, sync, tests, every example dir"
-	@echo "  test          Build and run the local-DB test runner"
-	@echo "  sync-test     Build and run the sync test runner"
-	@echo "  stress-test   Build and run the test binary with the long iteration count"
-	@echo "                (TURSO_TSAN_STRESS=true). Catches gross concurrency failures"
-	@echo "                without the ThreadSanitizer slowdown."
-	@echo "  tsan-test     Same as stress-test plus -sanitize:thread. Race reports"
-	@echo "                exit non-zero. Intended for nightly or workflow_dispatch CI."
-	@echo "  example       Run the minimal example"
-	@echo "  examples      Run every example"
-	@echo "  clean         Remove odin build outputs"
+	@echo "  sdk-kit               Build the local-DB C ABI library (debug profile) via cargo"
+	@echo "  sdk-kit-release       Build the local-DB C ABI library (release profile, --release) via cargo"
+	@echo "  sync-sdk-kit          Build the sync-engine C ABI library (debug profile) via cargo"
+	@echo "  sync-sdk-kit-release  Build the sync-engine C ABI library (release profile) via cargo"
+	@echo "  check                 odin check on turso, sync, tests, every example dir"
+	@echo "  test                  Build and run the local-DB test runner"
+	@echo "  sync-test             Build and run the sync test runner"
+	@echo "  stress-test           Build and run the test binary with the long iteration count"
+	@echo "                        (TURSO_TSAN_STRESS=true). Catches gross concurrency failures"
+	@echo "                        without the ThreadSanitizer slowdown."
+	@echo "  tsan-test             Same as stress-test plus -sanitize:thread. Race reports"
+	@echo "                        exit non-zero. Intended for nightly or workflow_dispatch CI."
+	@echo "  example               Run the minimal example"
+	@echo "  examples              Run every example"
+	@echo "  clean                 Remove odin build outputs"
 
 sdk-kit:
 	cd $(WORKSPACE) && cargo build -p turso_sdk_kit
 	@test -f $(SDK_KIT_TARGET)/$(LIB_FILE) || (echo "missing $(LIB_FILE) in $(SDK_KIT_TARGET)" && exit 1)
 
+# Release builds are intended for downstream packaging; in-repo development
+# uses the debug profile per workspace CLAUDE.md. The resulting dylib lives at
+# $(SDK_KIT_TARGET_RELEASE), which requires a different rpath; users who switch
+# profiles should rebuild any Odin binary against the matching target/ path.
+sdk-kit-release:
+	cd $(WORKSPACE) && cargo build -p turso_sdk_kit --release
+	@test -f $(SDK_KIT_TARGET_RELEASE)/$(LIB_FILE) || (echo "missing $(LIB_FILE) in $(SDK_KIT_TARGET_RELEASE)" && exit 1)
+
 sync-sdk-kit:
 	cd $(WORKSPACE) && cargo build -p turso_sync_sdk_kit
 	@test -f $(SDK_KIT_TARGET)/$(LIB_SYNC_FILE) || (echo "missing $(LIB_SYNC_FILE) in $(SDK_KIT_TARGET)" && exit 1)
+
+sync-sdk-kit-release:
+	cd $(WORKSPACE) && cargo build -p turso_sync_sdk_kit --release
+	@test -f $(SDK_KIT_TARGET_RELEASE)/$(LIB_SYNC_FILE) || (echo "missing $(LIB_SYNC_FILE) in $(SDK_KIT_TARGET_RELEASE)" && exit 1)
 
 check:
 	odin check turso -no-entry-point

@@ -14,12 +14,17 @@ import curlhttp "../../turso/sync/curlhttp"
 
 @(private="file")
 Curl_Test_Server :: struct {
-	listener:        net.TCP_Socket,
-	mu:              sync.Mutex,
-	received:        [dynamic]u8,
-	response_status: int,
-	response_body:   string,
-	accept_err:      bool,
+	listener:            net.TCP_Socket,
+	mu:                  sync.Mutex,
+	received:            [dynamic]u8,
+	response_status:     int,
+	response_body:       string,
+	// When true, the response is sent without a Content-Length header and the
+	// connection is closed to delimit the body. Lets the size-cap regression
+	// tests exercise the write_callback hard cap (which is the defense layer
+	// that handles a server lying about or omitting Content-Length).
+	omit_content_length: bool,
+	accept_err:          bool,
 }
 
 @(private="file")
@@ -48,10 +53,18 @@ curl_test_server_run :: proc(s: ^Curl_Test_Server) {
 	}
 
 	body := s.response_body
-	hdr := fmt.tprintf(
-		"HTTP/1.1 %d Result\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
-		s.response_status, len(body),
-	)
+	hdr: string
+	if s.omit_content_length {
+		hdr = fmt.tprintf(
+			"HTTP/1.1 %d Result\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n",
+			s.response_status,
+		)
+	} else {
+		hdr = fmt.tprintf(
+			"HTTP/1.1 %d Result\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
+			s.response_status, len(body),
+		)
+	}
 	net.send_tcp(client, transmute([]u8)hdr)
 	if len(body) > 0 {
 		net.send_tcp(client, transmute([]u8)body)
@@ -90,11 +103,12 @@ curl_test_request_complete :: proc(buf: []u8) -> bool {
 }
 
 @(private="file")
-start_curl_test_server :: proc(status: int, body: string) -> (^Curl_Test_Server, ^thread.Thread, int) {
+start_curl_test_server :: proc(status: int, body: string, omit_content_length: bool = false) -> (^Curl_Test_Server, ^thread.Thread, int) {
 	s := new(Curl_Test_Server)
 	s.received = make([dynamic]u8)
 	s.response_status = status
 	s.response_body = body
+	s.omit_content_length = omit_content_length
 
 	listener, lerr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = 0})
 	if lerr != nil { test_fail(format = "listen_tcp: %v", args = []any{lerr}) }
@@ -185,4 +199,55 @@ test_curlhttp_custom_method_delete :: proc() {
 
 	got := string(s.received[:])
 	expect_true(strings.has_prefix(got, "DELETE /item HTTP/1.1\r\n"), "server saw DELETE request line")
+}
+
+// Regression test for M4. CURLOPT_MAXFILESIZE_LARGE catches a declared
+// Content-Length above MAX_RESPONSE_BYTES before any body bytes transfer and
+// curl surfaces CURLE_FILESIZE_EXCEEDED. The roundtrip wrapper promotes that
+// into the same typed "response exceeded" message the streaming-cap path
+// produces, so callers can branch on size violations without inspecting libcurl
+// error codes.
+test_curlhttp_rejects_response_exceeding_max_bytes_via_content_length :: proc() {
+	saved_cap := curlhttp.MAX_RESPONSE_BYTES
+	defer curlhttp.MAX_RESPONSE_BYTES = saved_cap
+	curlhttp.MAX_RESPONSE_BYTES = 256
+
+	body := strings.repeat("x", 1024, context.temp_allocator)
+	s, t, port := start_curl_test_server(200, body)
+	defer stop_curl_test_server(s, t)
+
+	req := sync_pkg.HTTP_Request{
+		url    = fmt.tprintf("http://127.0.0.1:%d/big", port),
+		method = "GET",
+	}
+	resp, msg, ok := curlhttp.roundtrip(nil, req, context.temp_allocator)
+	expect_false(ok, "oversize response should be rejected")
+	expect_eq(resp.status, i32(0), "no status on rejected response")
+	expect_eq(len(resp.body), 0, "no body buffered on rejected response")
+	expect_true(strings.contains(msg, "response exceeded"), fmt.tprintf("expected typed 'response exceeded' message, got: %s", msg))
+}
+
+// Regression test for M4. When the server omits Content-Length and just
+// streams the body (or lies about it), MAXFILESIZE_LARGE cannot help; the
+// write_callback hard cap is the only defence. Aborting the transfer there
+// surfaces as CURLE_WRITE_ERROR and the wrapper translates it into the same
+// typed "response exceeded" message.
+test_curlhttp_rejects_response_exceeding_max_bytes_via_streaming :: proc() {
+	saved_cap := curlhttp.MAX_RESPONSE_BYTES
+	defer curlhttp.MAX_RESPONSE_BYTES = saved_cap
+	curlhttp.MAX_RESPONSE_BYTES = 256
+
+	body := strings.repeat("x", 1024, context.temp_allocator)
+	s, t, port := start_curl_test_server(200, body, omit_content_length = true)
+	defer stop_curl_test_server(s, t)
+
+	req := sync_pkg.HTTP_Request{
+		url    = fmt.tprintf("http://127.0.0.1:%d/big", port),
+		method = "GET",
+	}
+	resp, msg, ok := curlhttp.roundtrip(nil, req, context.temp_allocator)
+	expect_false(ok, "oversize streaming response should be rejected")
+	expect_eq(resp.status, i32(0), "no status on rejected response")
+	expect_eq(len(resp.body), 0, "rejected response must not surface partial body")
+	expect_true(strings.contains(msg, "response exceeded"), fmt.tprintf("expected typed 'response exceeded' message, got: %s", msg))
 }

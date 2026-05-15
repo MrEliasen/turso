@@ -1,7 +1,9 @@
 package sync_tests
 
+import "core:c/libc"
 import "core:fmt"
 import "core:mem"
+import "core:os"
 
 Test_Entry :: struct {
 	name: string,
@@ -20,6 +22,7 @@ ALL_TESTS := [?]Test_Entry{
 	{"test_sync_push_returns_error_when_client_fails", test_sync_push_returns_error_when_client_fails},
 	{"test_sync_push_returns_error_on_http_401",       test_sync_push_returns_error_on_http_401},
 	{"test_sync_push_returns_error_on_http_500",       test_sync_push_returns_error_on_http_500},
+	{"test_sync_push_4xx_response_body_propagates_to_error", test_sync_push_4xx_response_body_propagates_to_error},
 	{"test_sync_push_pipeline_ok_handler_emits_valid_request", test_sync_push_pipeline_ok_handler_emits_valid_request},
 	{"test_sync_push_pipeline_stub_propagates_server_error",   test_sync_push_pipeline_stub_propagates_server_error},
 	{"test_sync_pull_with_empty_protobuf_handler",             test_sync_pull_with_empty_protobuf_handler},
@@ -27,6 +30,8 @@ ALL_TESTS := [?]Test_Entry{
 	{"test_curlhttp_post_with_body_and_header",                test_curlhttp_post_with_body_and_header},
 	{"test_curlhttp_returns_non_2xx_status_without_error",     test_curlhttp_returns_non_2xx_status_without_error},
 	{"test_curlhttp_custom_method_delete",                     test_curlhttp_custom_method_delete},
+	{"test_curlhttp_rejects_response_exceeding_max_bytes_via_content_length", test_curlhttp_rejects_response_exceeding_max_bytes_via_content_length},
+	{"test_curlhttp_rejects_response_exceeding_max_bytes_via_streaming",      test_curlhttp_rejects_response_exceeding_max_bytes_via_streaming},
 	{"test_http_response_chunks_empty_body",                   test_http_response_chunks_empty_body},
 	{"test_http_response_chunks_smaller_than_chunk",           test_http_response_chunks_smaller_than_chunk},
 	{"test_http_response_chunks_exact_multiple",               test_http_response_chunks_exact_multiple},
@@ -59,14 +64,26 @@ main :: proc() {
 	context.allocator = mem.tracking_allocator(&track)
 
 	passed := 0
+	failed := 0
 	for t in ALL_TESTS {
 		fmt.printf("[ RUN  ] %s\n", t.name)
-		t.fn()
-		fmt.printf("[  OK  ] %s\n", t.name)
-		passed += 1
+		test_failed = false
+		if libc.setjmp(&test_jmp_buf) == 0 {
+			t.fn()
+		}
+		if test_failed {
+			fmt.printf("[ FAIL ] %s\n", t.name)
+			failed += 1
+		} else {
+			fmt.printf("[  OK  ] %s\n", t.name)
+			passed += 1
+		}
 	}
-	fmt.printf("\n%d/%d tests passed\n", passed, len(ALL_TESTS))
+	fmt.printf("\n%d/%d tests passed, %d failed\n", passed, len(ALL_TESTS), failed)
 
+	if failed > 0 {
+		fmt.eprintf("\nNOTE: a failing test longjmps out of its body without running deferred cleanup, so any allocations below may be from a failing test's skipped cleanup rather than a binding leak. Fix the failures first, then rerun and check the leak report.\n")
+	}
 	if len(track.allocation_map) > 0 {
 		fmt.eprintf("\n=== %d LEAKED ALLOCATIONS ===\n", len(track.allocation_map))
 		for _, entry in track.allocation_map {
@@ -80,5 +97,15 @@ main :: proc() {
 		for entry in track.bad_free_array {
 			fmt.eprintf("  ptr=%v @ %v\n", entry.memory, entry.location)
 		}
+	}
+	// Exit policy: any failed test is fatal. Tracked-allocator leaks and bad
+	// frees are also fatal, but only when there were no failed tests; a failed
+	// test longjmps past its own cleanup, so the leaks it leaves behind are
+	// not real binding leaks and should not mask the underlying test failure.
+	if failed > 0 {
+		os.exit(1)
+	}
+	if len(track.allocation_map) > 0 || len(track.bad_free_array) > 0 {
+		os.exit(1)
 	}
 }

@@ -116,6 +116,13 @@ pull :: proc(db: Sync_Database) -> (applied: bool, err: turso.Error, ok: bool) {
 
 	// Phase 2: apply_changes. CONSUMES the changes handle even on failure —
 	// do not call turso_sync_changes_deinit afterward.
+	//
+	// Failure path note: when apply_changes returns non-OK we return at the
+	// next line WITHOUT reaching the deferred deinit on the line below, which
+	// is correct because the C ABI guarantees `*apply_op` is left nil on
+	// failure (see turso_sync.h on turso_sync_database_apply_changes). Should
+	// a future engine change leak a non-nil operation on failure, the early
+	// return would leak it; revisit then.
 	apply_op: raw.Operation_Ptr
 	if code := raw.turso_sync_database_apply_changes(db.handle, changes_handle, &apply_op, &c_err); code != .OK {
 		return false, turso.error_from_status(code, c_err, "turso_sync_database_apply_changes"), false

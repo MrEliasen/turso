@@ -47,12 +47,18 @@ HTTP_Client :: struct {
 	auth_token: string,
 }
 
+// slice_to_string returns a BORROWED Odin string view over the FFI slice.
+// The bytes belong to whoever owns the source Slice_Ref (typically the engine,
+// for the duration of an FFI call). Copy with `strings.clone` if the view
+// needs to outlive the original slice.
 @(private)
 slice_to_string :: proc(s: raw.Slice_Ref) -> string {
 	if s.ptr == nil || s.len == 0 { return "" }
 	return string(([^]u8)(s.ptr)[:s.len])
 }
 
+// slice_to_bytes returns a BORROWED []u8 view over the FFI slice. Same
+// lifetime story as slice_to_string: copy before the source goes away.
 @(private)
 slice_to_bytes :: proc(s: raw.Slice_Ref) -> []u8 {
 	if s.ptr == nil || s.len == 0 { return nil }

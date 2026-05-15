@@ -23,6 +23,10 @@ USE_SYNC_DYLIB :: #config(TURSO_USE_SYNC_DYLIB, false)
 //   .Darwin, .Linux. Other Odin-supported OSes are listed below as a courtesy
 //   for downstream builds but are not covered by CI; the Makefile and
 //   turso/sync/file_io.odin only handle Darwin / Linux.
+//
+// The two trees below differ only in the library name (core vs sync dylib).
+// Odin's `foreign import` requires a string literal for the path, so we cannot
+// share a `LIB_NAME` constant; keeping the trees explicit is the trade-off.
 when USE_SYNC_DYLIB {
 	when ODIN_OS == .Darwin {
 		foreign import turso "system:turso_sync_sdk_kit"

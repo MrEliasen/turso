@@ -74,4 +74,29 @@ test_cache_clear_releases_entries :: proc() {
 	expect_eq(turso.cache_count(cache), 2, "two entries before clear")
 	turso.cache_clear(&cache)
 	expect_eq(turso.cache_count(cache), 0, "zero entries after clear")
+	// cache stays usable after clear; re-insert and confirm.
+	_, e, ok := turso.prepare_cached(t.conn, &cache, "SELECT 3")
+	expect_no_err(e, ok, "prepare_cached after clear")
+	expect_eq(turso.cache_count(cache), 1, "one entry after re-insert")
+}
+
+// M2 regression: a zero-value Stmt_Cache (no cache_init call) must lazily
+// allocate its backing map on first insert. Pre-audit, the missing init
+// would panic at `cache.entries[owned_sql] = stmt` because Odin maps cannot
+// take inserts when nil.
+test_prepare_cached_with_zero_value_cache :: proc() {
+	t := test_db_open_memory()
+	defer test_db_close(&t)
+
+	cache: turso.Stmt_Cache  // zero value, no cache_init
+	defer turso.cache_destroy(&cache)
+
+	stmt, e, ok := turso.prepare_cached(t.conn, &cache, "SELECT 1")
+	expect_no_err(e, ok, "prepare_cached on zero-value cache must lazy-init the map")
+	expect_eq(turso.cache_count(cache), 1, "one entry after lazy-init insert")
+
+	// Second call hits the cache and returns the same handle.
+	stmt2, e2, ok2 := turso.prepare_cached(t.conn, &cache, "SELECT 1")
+	expect_no_err(e2, ok2, "prepare_cached hit on lazy-init cache")
+	expect_true(stmt.handle == stmt2.handle, "same C handle on cache hit")
 }

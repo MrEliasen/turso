@@ -131,3 +131,53 @@ test_conn_with_transaction_body_failure_propagates :: proc() {
 	_, _, _ = turso.conn_exec(t.conn, "INSERT INTO t(v) VALUES (99)")
 	expect_eq(count_rows(t.conn), i64(1), "post-rollback inserts go through autocommit")
 }
+
+// Regression test for M3: when COMMIT fails (body succeeded but the engine
+// rejects the commit, here via a deferred FK violation), conn_with_transaction
+// must surface the commit error AND run a best-effort ROLLBACK so the
+// connection ends in autocommit rather than stuck in an open transaction.
+// A subsequent write through the same connection must succeed without first
+// calling ROLLBACK manually.
+test_conn_with_transaction_commit_failure_rollback_recovers :: proc() {
+	t := test_db_open_file("txn_commit_fail")
+	defer test_db_close(&t)
+
+	exec_ok(t.conn, "PRAGMA foreign_keys = ON")
+	exec_ok(t.conn, "CREATE TABLE parent(id INTEGER PRIMARY KEY)")
+	exec_ok(t.conn, "CREATE TABLE child(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED)")
+
+	// The body inserts an orphan child. With a DEFERRABLE INITIALLY DEFERRED
+	// foreign key, the row check fires at COMMIT time, so the body's INSERT
+	// itself succeeds and the body returns true. The wrapper's COMMIT then
+	// fails with a FK error.
+	err, ok := turso.conn_with_transaction(t.conn, proc(c: turso.Connection) -> bool {
+		_, _, iok := turso.conn_exec(c, "INSERT INTO child(id, parent_id) VALUES (1, 999)")
+		return iok
+	})
+	defer turso.error_destroy(&err)
+	expect_false(ok, "deferred FK violation must propagate as a transaction failure")
+
+	// The error must clearly identify the FK violation rather than a generic
+	// commit failure. The message comes from the engine via error_from_status,
+	// so the substring check is on the formatted Error.
+	msg := turso.error_string(err, context.temp_allocator)
+	expect_string_contains(msg, "foreign key", "commit error must mention the FK violation")
+
+	// The orphan row must not be visible: the wrapper either let the engine
+	// auto-rollback or ran the explicit ROLLBACK itself.
+	child_count, _, _ := turso.conn_scalar_i64(t.conn, "SELECT COUNT(*) FROM child")
+	expect_eq(child_count, i64(0), "failed commit must not leave the orphan child behind")
+
+	// The connection must be in autocommit now. A follow-up
+	// conn_with_transaction must complete normally; if the wrapper had
+	// skipped the rollback, BEGIN here would fail with "cannot start a
+	// transaction within a transaction".
+	rerr, rok := turso.conn_with_transaction(t.conn, proc(c: turso.Connection) -> bool {
+		_, _, ok := turso.conn_exec(c, "INSERT INTO parent(id) VALUES (1)")
+		return ok
+	})
+	expect_no_err(rerr, rok, "follow-up transaction must succeed after the commit failure was cleaned up")
+
+	parent_count, _, _ := turso.conn_scalar_i64(t.conn, "SELECT COUNT(*) FROM parent")
+	expect_eq(parent_count, i64(1), "recovery transaction must persist its insert")
+}

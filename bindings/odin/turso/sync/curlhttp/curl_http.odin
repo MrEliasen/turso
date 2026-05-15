@@ -37,11 +37,24 @@ import sync "../"
 CONNECT_TIMEOUT_SECONDS :: 10
 REQUEST_TIMEOUT_SECONDS :: 60
 
+// MAX_RESPONSE_BYTES caps the total bytes the client will buffer from a single
+// HTTP response. Defends against a misbehaving or malicious remote streaming
+// gigabytes of body to force unbounded memory growth inside the sync engine.
+// 256 MiB is well above any expected sync payload but small enough to keep
+// the process from OOM on a 32-bit host. Callers needing a different cap can
+// either reassign this package variable before issuing requests or supply
+// their own HTTP_Do via sync.HTTP_Client.roundtrip. The package itself only
+// reads this value; tests adjust it under the assumption that no concurrent
+// roundtrip is in flight.
+MAX_RESPONSE_BYTES: i64 = 256 * 1024 * 1024
+
 @(private="file")
 Curl_Write_State :: struct {
 	buf:       ^[dynamic]u8,
 	allocator: mem.Allocator,
+	max_bytes: int,
 	ok:        bool,
+	too_large: bool,
 }
 
 @(private="file")
@@ -51,6 +64,14 @@ write_callback :: proc "c" (data: rawptr, size: c.size_t, nmemb: c.size_t, userd
 	context.allocator = state.allocator
 	total := int(size) * int(nmemb)
 	if total == 0 { return 0 }
+	// Hard cap: if appending this chunk would push the buffer past max_bytes,
+	// flag the request and abort the transfer. The remote may have lied about
+	// (or omitted) Content-Length, so MAXFILESIZE_LARGE alone is not sufficient.
+	if state.max_bytes > 0 && len(state.buf) + total > state.max_bytes {
+		state.ok = false
+		state.too_large = true
+		return 0
+	}
 	src := ([^]u8)(data)[:total]
 	if _, err := append(state.buf, ..src); err != nil {
 		state.ok = false
@@ -98,6 +119,13 @@ roundtrip :: proc(user_data: rawptr, req: sync.HTTP_Request, allocator: mem.Allo
 	if rc := curl.easy_setopt(handle, curl.option.TIMEOUT, c.long(REQUEST_TIMEOUT_SECONDS)); rc != .E_OK {
 		return {}, curl_err("CURLOPT_TIMEOUT", rc, allocator), false
 	}
+	// Server-declared body size cap. curl returns CURLE_FILESIZE_EXCEEDED before
+	// transferring if the response advertises Content-Length above this limit.
+	// The write_callback hard cap below handles the case where the server lies
+	// or omits Content-Length and just streams.
+	if rc := curl.easy_setopt(handle, curl.option.MAXFILESIZE_LARGE, curl.off_t(MAX_RESPONSE_BYTES)); rc != .E_OK {
+		return {}, curl_err("CURLOPT_MAXFILESIZE_LARGE", rc, allocator), false
+	}
 
 	method_upper := strings.to_upper(req.method, allocator)
 	switch method_upper {
@@ -139,7 +167,12 @@ roundtrip :: proc(user_data: rawptr, req: sync.HTTP_Request, allocator: mem.Allo
 	}
 
 	body_buf := make([dynamic]u8, 0, 4096, allocator)
-	state := Curl_Write_State{buf = &body_buf, allocator = allocator, ok = true}
+	state := Curl_Write_State{
+		buf       = &body_buf,
+		allocator = allocator,
+		max_bytes = int(MAX_RESPONSE_BYTES),
+		ok        = true,
+	}
 	if rc := curl.easy_setopt(handle, curl.option.WRITEFUNCTION, write_callback); rc != .E_OK {
 		return {}, curl_err("CURLOPT_WRITEFUNCTION", rc, allocator), false
 	}
@@ -148,9 +181,24 @@ roundtrip :: proc(user_data: rawptr, req: sync.HTTP_Request, allocator: mem.Allo
 	}
 
 	if rc := curl.easy_perform(handle); rc != .E_OK {
+		// Two defence layers can reject an oversize response:
+		//   1. CURLOPT_MAXFILESIZE_LARGE catches a declared Content-Length above
+		//      the cap before any body bytes are transferred and surfaces
+		//      CURLE_FILESIZE_EXCEEDED.
+		//   2. The write_callback hard cap aborts the transfer mid-stream when
+		//      the server lies about (or omits) Content-Length, which curl
+		//      surfaces as CURLE_WRITE_ERROR.
+		// Both paths produce the same typed message so callers can branch on
+		// "response too large" without inspecting libcurl error codes.
+		if state.too_large || rc == .E_FILESIZE_EXCEEDED {
+			return {}, fmt.aprintf("response exceeded MAX_RESPONSE_BYTES (%d) - server returned too much data", MAX_RESPONSE_BYTES, allocator = allocator), false
+		}
 		return {}, curl_err("curl_easy_perform", rc, allocator), false
 	}
 	if !state.ok {
+		if state.too_large {
+			return {}, fmt.aprintf("response exceeded MAX_RESPONSE_BYTES (%d) - server returned too much data", MAX_RESPONSE_BYTES, allocator = allocator), false
+		}
 		return {}, "curl write callback ran out of memory", false
 	}
 

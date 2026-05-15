@@ -180,6 +180,21 @@ test_conn_query_one_struct :: proc() {
 	expect_eq(row.name, "eve", "name populated")
 }
 
+// T2: conn_query_one_struct against an empty table must surface a typed
+// error rather than silently returning an unpopulated struct.
+test_conn_query_one_struct_zero_rows_errors :: proc() {
+	t := test_db_open_memory()
+	defer test_db_close(&t)
+	exec_ok(t.conn, "CREATE TABLE t(id INTEGER, name TEXT)")
+
+	row: RM_User
+	e, ok := turso.conn_query_one_struct(t.conn, "SELECT id, name FROM t", &row)
+	defer turso.error_destroy(&e)
+	expect_false(ok, "conn_query_one_struct on empty table must fail")
+	expect_eq(e.code, turso.Status_Code.ERROR, "zero-rows is ERROR not MISUSE")
+	expect_eq(row.id, i64(0), "struct stays at zero value on error")
+}
+
 test_conn_query_optional_struct_zero_rows :: proc() {
 	t := test_db_open_memory()
 	defer test_db_close(&t)

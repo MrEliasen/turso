@@ -10,6 +10,11 @@ import raw "raw"
 // An embedded NUL byte in sql is rejected with a typed MISUSE error rather
 // than silently truncating the query at the first NUL when it is handed to
 // the C ABI.
+//
+// The returned Statement OWNS a clone of sql; finalize releases it. Callers
+// are therefore free to throw away their own SQL buffer (e.g. a stack-local
+// fmt.tprintf result) once prepare returns. Error.sql, when set, is likewise
+// owned and freed by error_destroy.
 prepare :: proc(conn: Connection, sql: string) -> (Statement, Error, bool) {
 	if conn.handle == nil {
 		return Statement{}, make_error(.MISUSE, "prepare", "connection is not open", sql), false
@@ -27,13 +32,16 @@ prepare :: proc(conn: Connection, sql: string) -> (Statement, Error, bool) {
 	if code != .OK {
 		return Statement{}, error_from_status(code, c_err, "turso_connection_prepare_single", sql), false
 	}
-	return Statement{handle = stmt_handle, db = conn.db, sql = sql}, error_none(), true
+	return Statement{handle = stmt_handle, db = conn.db, sql = strings.clone(sql)}, error_none(), true
 }
 
 // prepare_first compiles the next statement from a multi-statement string and
 // returns the byte offset immediately after the parsed statement. Loop over the
 // result to consume the full string. Returns ok with a nil-handle Statement
 // when no more statements can be parsed.
+//
+// Ownership rule matches prepare: the returned Statement owns a clone of sql,
+// freed by finalize.
 prepare_first :: proc(conn: Connection, sql: string) -> (stmt: Statement, tail: int, err: Error, ok: bool) {
 	if conn.handle == nil {
 		return Statement{}, 0, make_error(.MISUSE, "prepare_first", "connection is not open", sql), false
@@ -55,7 +63,7 @@ prepare_first :: proc(conn: Connection, sql: string) -> (stmt: Statement, tail: 
 	if stmt_handle == nil {
 		return Statement{}, int(tail_idx), error_none(), true
 	}
-	return Statement{handle = stmt_handle, db = conn.db, sql = sql}, int(tail_idx), error_none(), true
+	return Statement{handle = stmt_handle, db = conn.db, sql = strings.clone(sql)}, int(tail_idx), error_none(), true
 }
 
 // step advances the statement one cycle. Returns .Row if a row is available,
@@ -163,6 +171,11 @@ reset :: proc(stmt: Statement) -> (Error, bool) {
 
 // finalize completes execution and releases statement resources. Idempotent.
 // Transparently drives run_io when async_io is enabled.
+//
+// Also releases the SQL clone allocated by prepare / prepare_first. Cached
+// statements (returned by prepare_cached) MUST NOT be finalized directly;
+// cache_destroy / cache_clear own the lifetime. Calling finalize on a
+// zero-value Statement is a no-op.
 finalize :: proc(stmt: ^Statement) -> (Error, bool) {
 	if stmt == nil || stmt.handle == nil { return error_none(), true }
 	err := error_none()
@@ -192,6 +205,10 @@ finalize :: proc(stmt: ^Statement) -> (Error, bool) {
 	}
 	raw.turso_statement_deinit(stmt.handle)
 	stmt.handle = nil
+	if len(stmt.sql) > 0 {
+		delete(stmt.sql)
+		stmt.sql = ""
+	}
 	return err, ok
 }
 

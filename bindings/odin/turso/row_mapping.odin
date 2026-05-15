@@ -49,6 +49,11 @@ stmt_scan_struct :: proc(stmt: Statement, out: ^$T, allocator := context.allocat
 	// heap allocation happens on the happy path. Wider rows promote to a
 	// temp-allocator slice so the binding does not artificially cap queries
 	// below SQLITE_MAX_COLUMN (default 2000).
+	//
+	// 64 covers any reasonable struct row (column count in real-world apps is
+	// typically well under 20). Larger rows are uncommon enough to be worth
+	// paying a temp_allocator hit; on the hot path the stack version avoids
+	// allocator pressure entirely.
 	STACK_COLS :: 64
 	stack_plans: [STACK_COLS]Scan_Plan
 	heap_plans:  []Scan_Plan
@@ -62,10 +67,14 @@ stmt_scan_struct :: proc(stmt: Statement, out: ^$T, allocator := context.allocat
 	plan_count := 0
 
 	for col_idx in 0 ..< n {
+		// col_name is allocator-owned and only needed for the field lookup. We
+		// delete it explicitly at end of use rather than deferring, because
+		// Odin's defer is procedure-scoped: queueing N deferred deletes inside
+		// a loop holds O(N) tiny strings until the function returns. For wide
+		// rows that matters; on narrow rows it is identical.
 		col_name := stmt_column_name(stmt, col_idx)
-		defer delete(col_name)
-
 		field_index := find_field_for_column(s, col_name)
+		delete(col_name)
 		if field_index < 0 { continue }
 
 		target_ptr := rawptr(uintptr(out) + s.offsets[field_index])
@@ -114,7 +123,10 @@ Scan_Plan :: struct {
 conn_query_one_struct :: proc(conn: Connection, sql: string, out: ^$T, args: ..Bind_Arg, allocator := context.allocator) -> (Error, bool) {
 	stmt, e1, ok1 := prepare(conn, sql)
 	if !ok1 { return e1, false }
-	defer { _, _ = finalize(&stmt) }
+	defer {
+		fe, _ := finalize(&stmt)
+		error_destroy(&fe)
+	}
 
 	if len(args) > 0 {
 		if e2, ok2 := stmt_bind_args(stmt, ..args); !ok2 { return e2, false }
@@ -142,7 +154,10 @@ conn_query_optional_struct :: proc(conn: Connection, sql: string, out: ^$T, args
 	(found: bool, err: Error, ok: bool) {
 	stmt, e1, ok1 := prepare(conn, sql)
 	if !ok1 { return false, e1, false }
-	defer { _, _ = finalize(&stmt) }
+	defer {
+		fe, _ := finalize(&stmt)
+		error_destroy(&fe)
+	}
 
 	if len(args) > 0 {
 		if e2, ok2 := stmt_bind_args(stmt, ..args); !ok2 { return false, e2, false }
@@ -185,7 +200,10 @@ conn_query_all_struct :: proc($T: typeid, conn: Connection, sql: string, args: .
 	(rows: []T, err: Error, ok: bool) {
 	stmt, e1, ok1 := prepare(conn, sql)
 	if !ok1 { return nil, e1, false }
-	defer { _, _ = finalize(&stmt) }
+	defer {
+		fe, _ := finalize(&stmt)
+		error_destroy(&fe)
+	}
 
 	if len(args) > 0 {
 		if e2, ok2 := stmt_bind_args(stmt, ..args); !ok2 { return nil, e2, false }

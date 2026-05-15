@@ -7,7 +7,10 @@ package turso
 conn_exec :: proc(conn: Connection, sql: string) -> (rows: u64, err: Error, ok: bool) {
 	stmt, e1, ok1 := prepare(conn, sql)
 	if !ok1 { return 0, e1, false }
-	defer { _, _ = finalize(&stmt) }
+	defer {
+		fe, _ := finalize(&stmt)
+		error_destroy(&fe)
+	}
 	return execute(stmt)
 }
 
@@ -17,7 +20,10 @@ conn_exec :: proc(conn: Connection, sql: string) -> (rows: u64, err: Error, ok: 
 conn_exec_args :: proc(conn: Connection, sql: string, args: ..Bind_Arg) -> (rows: u64, err: Error, ok: bool) {
 	stmt, e1, ok1 := prepare(conn, sql)
 	if !ok1 { return 0, e1, false }
-	defer { _, _ = finalize(&stmt) }
+	defer {
+		fe, _ := finalize(&stmt)
+		error_destroy(&fe)
+	}
 	if len(args) > 0 {
 		if e2, ok2 := stmt_bind_args(stmt, ..args); !ok2 { return 0, e2, false }
 	}
@@ -48,7 +54,8 @@ conn_exec_batch :: proc(conn: Connection, sql: string) -> (rows: u64, err: Error
 			break
 		}
 		executed, ee, eok := execute(stmt)
-		_, _ = finalize(&stmt)
+		fe, _ := finalize(&stmt)
+		error_destroy(&fe)
 		if !eok { return total, ee, false }
 		total += executed
 		remaining = remaining[tail:]
@@ -60,7 +67,10 @@ conn_exec_batch :: proc(conn: Connection, sql: string) -> (rows: u64, err: Error
 conn_scalar_i64 :: proc(conn: Connection, sql: string, args: ..Bind_Arg) -> (val: i64, err: Error, ok: bool) {
 	stmt, e1, ok1 := prepare(conn, sql)
 	if !ok1 { return 0, e1, false }
-	defer { _, _ = finalize(&stmt) }
+	defer {
+		fe, _ := finalize(&stmt)
+		error_destroy(&fe)
+	}
 	if len(args) > 0 {
 		if e2, ok2 := stmt_bind_args(stmt, ..args); !ok2 { return 0, e2, false }
 	}

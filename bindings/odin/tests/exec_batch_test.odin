@@ -36,17 +36,6 @@ test_exec_batch_stops_on_error :: proc() {
 	expect_eq(count, i64(1), "the post-failure INSERT did not run")
 }
 
-test_exec_batch_on_closed_connection_returns_misuse :: proc() {
-	t := test_db_open_memory()
-	_, _ = turso.conn_close(&t.conn)
-	defer test_db_close(&t)
-
-	_, e, ok := turso.conn_exec_batch(t.conn, "CREATE TABLE x(v)")
-	defer turso.error_destroy(&e)
-	expect_false(ok, "exec_batch on closed connection must fail")
-	expect_eq(e.code, turso.Status_Code.MISUSE, "closed-connection misuse")
-}
-
 test_exec_batch_with_only_whitespace_succeeds :: proc() {
 	t := test_db_open_memory()
 	defer test_db_close(&t)

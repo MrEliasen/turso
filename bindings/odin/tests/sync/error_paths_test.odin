@@ -1,6 +1,7 @@
 package sync_tests
 
 import "core:mem"
+import "core:strings"
 import turso "../../turso"
 import sync "../../turso/sync"
 
@@ -101,4 +102,37 @@ test_sync_push_returns_error_on_http_500 :: proc() {
 	e, ok := sync.push(db)
 	expect_err(e, ok, "sync.push must fail when server returns 500")
 	turso.error_destroy(&e)
+}
+
+// Regression test for the body-propagation contract: when the server returns
+// a 4xx with a structured JSON error body, that body must reach the caller in
+// the surfaced Error rather than being silently dropped. Without this pin a
+// future engine refactor could discard the body and the caller would only see
+// a generic status-code message, blocking diagnosis of client-side mistakes.
+//
+// The assertion is intentionally loose: either Error.message or Error.ctx
+// must contain the body's identifying substring. The engine controls which
+// field carries the body and we don't want to over-fit the test to one path.
+test_sync_push_4xx_response_body_propagates_to_error :: proc() {
+	dir := make_temp_dir("err_body_propagation")
+	defer remove_temp_dir(dir)
+
+	stub: Stub_State
+	stub_init(&stub)
+	defer stub_destroy(&stub)
+	stub.default_status = 403
+	// Identifying marker the test grep-asserts on. Using a hyphenated literal
+	// so it cannot accidentally appear in the generic engine error wording.
+	stub.default_body = transmute([]u8)string("{\"error\":\"client_not_authorised_xyz123\"}")
+
+	db := make_db_with_local_changes(dir, stub_client(&stub))
+	defer sync.database_close(&db)
+
+	e, ok := sync.push(db)
+	expect_err(e, ok, "sync.push must fail on 403")
+	defer turso.error_destroy(&e)
+
+	formatted := turso.error_string(e, context.temp_allocator)
+	contains_body := strings.contains(formatted, "client_not_authorised_xyz123")
+	expect_true(contains_body, "Error must carry the server response body so the caller can diagnose the 4xx")
 }

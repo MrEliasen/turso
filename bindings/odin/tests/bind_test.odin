@@ -148,3 +148,53 @@ test_bind_too_many_args :: proc() {
 	expect_false(ok, "binding 2 args to a 1-param statement should fail")
 	expect_eq(e.code, turso.Status_Code.MISUSE, "error code is MISUSE")
 }
+
+// Named-parameter prefix coverage. SQLite recognises `:name`, `@name`, and
+// `$name` for named binding (positional `?N` is dispatched separately and is
+// covered by test_bind_positional_question_index). The binding's role is to
+// forward the prefix bytes verbatim to `stmt_bind_named_*`; this driver
+// proves each prefix shape hits the same dispatch with a single statement
+// per shape so any future regression in the prefix-forwarding path surfaces
+// immediately.
+test_bind_named_prefix_variants :: proc() {
+	cases := [?]struct{
+		name, sql, a, b: string,
+		want:            i64,
+	}{
+		{name = ":colon",  sql = "SELECT :a + :b", a = ":a", b = ":b", want = 12},
+		{name = "@at",     sql = "SELECT @x + @y", a = "@x", b = "@y", want = 30},
+		{name = "$dollar", sql = "SELECT $a + $b", a = "$a", b = "$b", want = 123},
+	}
+	for tc in cases {
+		t := test_db_open_memory()
+		defer test_db_close(&t)
+
+		stmt := prep_ok(t.conn, tc.sql)
+		defer finalize_ok(&stmt)
+
+		e1, ok1 := turso.stmt_bind_named_int(stmt, tc.a, 5)
+		expect_no_err(e1, ok1, tc.a)
+		e2, ok2 := turso.stmt_bind_named_int(stmt, tc.b, tc.want - 5)
+		expect_no_err(e2, ok2, tc.b)
+
+		step_expect_row(stmt)
+		expect_eq(turso.stmt_get_int(stmt, 0), tc.want, tc.name)
+	}
+}
+
+test_bind_positional_question_index :: proc() {
+	t := test_db_open_memory()
+	defer test_db_close(&t)
+
+	// ?N positional binding: bind args by 1-based index regardless of order.
+	stmt := prep_ok(t.conn, "SELECT ?2 - ?1")
+	defer finalize_ok(&stmt)
+
+	e1, ok1 := turso.stmt_bind_int(stmt, 1, 10)
+	expect_no_err(e1, ok1, "bind ?1")
+	e2, ok2 := turso.stmt_bind_int(stmt, 2, 50)
+	expect_no_err(e2, ok2, "bind ?2")
+
+	step_expect_row(stmt)
+	expect_eq(turso.stmt_get_int(stmt, 0), i64(40), "?2 - ?1 = 40")
+}
