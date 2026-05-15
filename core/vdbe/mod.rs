@@ -204,6 +204,30 @@ impl CommitState {
             CommitState::Ready | CommitState::Committing | CommitState::CommittingAttached => {}
         }
     }
+
+    fn cleanup_abandoned_mvcc_commit(&mut self, connection: &Connection) {
+        match self {
+            CommitState::CommittingAttachedMvcc {
+                state_machine,
+                db_id: attached_db_id,
+                ..
+            } if !state_machine.is_finalized() => {
+                if connection
+                    .database_schemas()
+                    .write()
+                    .remove(attached_db_id)
+                    .is_some()
+                {
+                    connection.bump_prepare_context_generation();
+                }
+            }
+            CommitState::CommittingMvcc { state_machine } if !state_machine.is_finalized() => {}
+            _ => return, // no-op for already-finalized state machines and non-MVCC commit states
+        };
+
+        connection.rollback_attached_mvcc_txs(true);
+        connection.rollback_attached_wal_txns();
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2192,6 +2216,18 @@ impl Program {
         // state machine cannot run its own error cleanup. abort() is the first
         // statement cleanup path that still owns that commit_state.
         state.commit_state.cleanup_mvcc_checkpoint_state();
+        // If a CommitStateMachine was non-terminal when the program was
+        // aborted — Statement dropped mid-IO yield, or `?` propagated a Busy
+        // out of BeginCommitLogicalLog / SyncLogicalLog — release the locks
+        // it acquired (`pager_commit_lock`, `exclusive_tx`) and roll back the
+        // orphan tx. Without this the tx stays in `Preparing`, the next op on
+        // this connection trips a `turso_assert_eq!(Active)`, and any other
+        // writer parks forever on the leaked `pager_commit_lock`. The
+        // following err-match's no-rollback arms (Busy / TxError / etc.)
+        // would otherwise skip this cleanup.
+        state
+            .commit_state
+            .cleanup_abandoned_mvcc_commit(&self.connection);
 
         // VACUUM (and VACUUM INTO) state can own internal helper statements whose drop path
         // releases nested guards. Clean it before checking whether this program
