@@ -16,6 +16,8 @@ import raw "raw"
 // All string fields are validated for embedded NUL bytes up front. Any NUL
 // would otherwise truncate the C-string handed to the Rust side and produce a
 // silently-wrong config; a typed MISUSE error is friendlier.
+//
+// C ABI: turso.h:136-141 (turso_database_new) + turso.h:146-149 (turso_database_open)
 database_open :: proc(cfg: Database_Config) -> (Database, Error, bool) {
 	if cfg.path == "" {
 		return Database{}, make_error(.MISUSE, "database_open", "Database_Config.path is required"), false
@@ -91,6 +93,8 @@ database_close :: proc(db: ^Database) {
 
 // connect opens a new connection to the database. Caller must call conn_close.
 // Applies busy_timeout_ms from the Database_Config if > 0.
+//
+// C ABI: turso.h:152-157 (turso_database_connect)
 connect :: proc(db: Database) -> (Connection, Error, bool) {
 	if db.handle == nil {
 		return Connection{}, make_error(.MISUSE, "connect", "database is not open"), false

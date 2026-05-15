@@ -48,6 +48,7 @@ ALL_TESTS := [?]Test_Entry{
 
 	// New audit tests
 	{"test_http_client_auth_token_is_forwarded", test_http_client_auth_token_is_forwarded},
+	{"test_sync_user_data_freed_after_database_close_no_crash", test_sync_user_data_freed_after_database_close_no_crash},
 
 	// Audit tier 2: auth_token must reject bytes that would let a caller
 	// smuggle additional headers or split the HTTP request.

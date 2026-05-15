@@ -21,6 +21,70 @@ Shipped:
 
 CI: see [`.github/workflows/odin.yml`](../../.github/workflows/odin.yml). Linux + macOS on Blacksmith runners, builds the Rust dylibs then runs `make check` / `make test` / `make sync-test`. Cloud E2E auto-runs when `TURSO_TEST_URL` + `TURSO_TEST_TOKEN` repository secrets are set; otherwise the suite still passes (the cloud test silently skips).
 
+## Quickstart
+
+Prerequisites: a recent Rust toolchain (the workspace uses stable) and an Odin compiler matching the CI pin (currently `dev-2026-05`, see `.github/workflows/odin.yml`).
+
+### Run the bundled example
+
+```sh
+git clone https://github.com/tursodatabase/turso
+cd turso
+cargo build -p turso_sdk_kit                  # produces target/debug/libturso_sdk_kit.{dylib,so}
+cd bindings/odin
+make example                                  # runs examples/minimal
+```
+
+Expected output:
+
+```
+turso version: 0.6.0
+last_insert_rowid: 2
+  row id=1 name="alice"
+  row id=2 name="bob"
+```
+
+If the loader cannot find the dylib, set `DYLD_LIBRARY_PATH` (macOS) or `LD_LIBRARY_PATH` (Linux) to `$(pwd)/../../target/debug` and retry. The Makefile uses rpath by default so this is normally not needed.
+
+### Use from your own Odin project
+
+Odin has no package manager, so depending on this binding means importing the `turso` directory from a checked-out copy of the workspace. The typical layout is to vendor `bindings/odin/turso` into your project tree (or pin a fixed commit via a git submodule / subtree).
+
+Minimum viable consumer:
+
+```odin
+// my_app/main.odin
+package main
+
+import "core:fmt"
+import turso "third_party/turso"   // path that resolves to bindings/odin/turso
+
+main :: proc() {
+    db, err, ok := turso.database_open(turso.Database_Config{path = ":memory:"})
+    if !ok { fmt.eprintln(turso.error_string(err)); return }
+    defer turso.database_close(&db)
+
+    conn, _, _ := turso.connect(db)
+    defer { _, _ = turso.conn_close(&conn) }
+
+    _, _, _ = turso.conn_exec(conn, "CREATE TABLE t(id INTEGER, name TEXT)")
+    _, _, _ = turso.conn_exec_args(conn,
+        "INSERT INTO t VALUES (?, ?)",
+        turso.bind_int(1), turso.bind_text("alice"))
+
+    n, _, _ := turso.conn_scalar_i64(conn, "SELECT COUNT(*) FROM t")
+    fmt.printfln("rows: %d", n)
+}
+```
+
+Build (substitute your own path to `target/debug`):
+
+```sh
+odin run my_app -extra-linker-flags:"-L/abs/path/to/turso/target/debug -Wl,-rpath,/abs/path/to/turso/target/debug"
+```
+
+For sync, additionally vendor `bindings/odin/turso/sync` (and optionally `turso/sync/curlhttp` if you want the bundled libcurl client), build `cargo build -p turso_sync_sdk_kit`, and define `-define:TURSO_USE_SYNC_DYLIB=true` so all `turso_*` symbols resolve to the single sync dylib. See the "Sync engine" section below.
+
 ## Layout
 
 ```
@@ -99,14 +163,16 @@ DYLD_LIBRARY_PATH=$(pwd)/../../target/debug odin run examples/minimal
 LD_LIBRARY_PATH=$(pwd)/../../target/debug odin run examples/minimal
 ```
 
-### Windows (best-effort, not in CI)
+### Windows (untested)
 
 The foreign imports include Windows branches and the dylib resolution rule is
 to copy `target/debug/turso_sdk_kit.dll` next to the produced `.exe`, or place
-it on `PATH`. CI runs on Linux + macOS only; the Makefile does not build a
-Windows target and `turso/sync/file_io.odin` uses POSIX-style path separators,
-so the sync engine is untested on Windows. Local DB use cases should work; if
-you find a regression on Windows, open an issue.
+it on `PATH`. CI runs on Linux + macOS only and the Makefile does not build a
+Windows target, so neither the local DB nor the sync paths have been
+exercised. The sync layer additionally uses POSIX-style path separators in
+`turso/sync/file_io.odin`, so sync will not work on Windows without changes.
+PRs adding a Windows CI runner and fixing the sync layer's path separators
+are welcome.
 
 ## API tour
 
@@ -273,9 +339,13 @@ client := sync.HTTP_Client{roundtrip = http_do, auth_token = "<jwt>"}
 Sync ownership rules:
 - `Sync_Database` is single-threaded. Caller must serialize sync operations.
 - `Sync_Database` deep-copies the `sync.Config` you pass to `database_create` / `database_open`, so it's safe to free or reuse your `Config` strings after the call returns. `database_close` frees the internal copies.
+- `HTTP_Client` is stored **by value** on the `Sync_Database`, and the binding does NOT deep-copy its fields. This is asymmetric with `sync.Config` and matters when any `HTTP_Client` field is heap-allocated:
+  - `HTTP_Client.auth_token` is a borrowed string. The bytes must remain valid for the life of the `Sync_Database`. String literals and tokens read once into a long-lived buffer are safe; freeing the source buffer after `database_create` returns leaves the dispatcher reading freed memory on the next request. If you cannot guarantee buffer lifetime, set the token on `sync.Config.auth_token` instead, since the Config side is cloned by `clone_config` in `turso/sync/database.odin`.
+  - `HTTP_Client.user_data` is opaque and caller-managed. It must remain valid for the life of the `Sync_Database` since the dispatcher passes it back to `HTTP_Client.roundtrip` on every request. The engine is pull-based and runs no background tasks, so `database_close` synchronously ends the dispatcher's interest in `user_data`: it is safe to free `user_data` immediately after `database_close` returns. The regression pin lives in [tests/sync/auth_token_test.odin](tests/sync/auth_token_test.odin) (`test_sync_user_data_freed_after_database_close_no_crash`).
+  - `HTTP_Client.roundtrip` is a proc pointer that must remain valid for the same window.
 - `Sync_Changes` returned by `pull`'s wait phase is **consumed** by `apply_changes` (the wrapper handles this internally). A trailing `sync.changes_close` is a no-op.
 - `Stats.revision` is an owned string; free with `sync.stats_destroy(&stats)` or `delete(stats.revision)`.
-- `auth_token` may be set either on `sync.Config` or on `HTTP_Client`. `sync.Config.auth_token` takes precedence; when it's empty the dispatcher falls back to `HTTP_Client.auth_token`. The non-nil value is injected as `Authorization: Bearer <token>` on every request. The token is static for the life of the `Sync_Database`; rotate by opening a fresh one.
+- `auth_token` may be set either on `sync.Config` or on `HTTP_Client`. `sync.Config.auth_token` takes precedence; when it's empty the dispatcher falls back to `HTTP_Client.auth_token`. The non-nil value is injected as `Authorization: Bearer <token>` on every request. The token is read on every request through the cloned `Config` or the borrowed `HTTP_Client` field; rotate by opening a fresh `Sync_Database`.
 
 ## Performance & tuning
 

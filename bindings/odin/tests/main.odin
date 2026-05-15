@@ -22,6 +22,7 @@ ALL_TESTS := [?]Test_Entry{
 	{"test_open_bad_path", test_open_bad_path},
 	{"test_idempotent_close", test_idempotent_close},
 	{"test_busy_timeout_setter", test_busy_timeout_setter},
+	{"test_set_busy_timeout_after_close_is_noop", test_set_busy_timeout_after_close_is_noop},
 
 	{"test_prepare_simple", test_prepare_simple},
 	{"test_prepare_invalid", test_prepare_invalid},
@@ -66,6 +67,7 @@ ALL_TESTS := [?]Test_Entry{
 	{"test_conn_with_savepoint_nested",                    test_conn_with_savepoint_nested},
 	{"test_conn_with_transaction_body_failure_propagates", test_conn_with_transaction_body_failure_propagates},
 	{"test_conn_with_transaction_commit_failure_rollback_recovers", test_conn_with_transaction_commit_failure_rollback_recovers},
+	{"test_conn_with_transaction_reentrancy_inner_begin_errors",     test_conn_with_transaction_reentrancy_inner_begin_errors},
 
 	{"test_stmt_scan_struct_by_name",                  test_stmt_scan_struct_by_name},
 	{"test_stmt_scan_struct_tag_override",             test_stmt_scan_struct_tag_override},
@@ -148,6 +150,7 @@ ALL_TESTS := [?]Test_Entry{
 	{"test_prepare_on_closed_connection_returns_misuse",   test_prepare_on_closed_connection_returns_misuse},
 	{"test_closed_connection_exec_apis_return_misuse",     test_closed_connection_exec_apis_return_misuse},
 	{"test_connect_on_closed_database_returns_misuse",     test_connect_on_closed_database_returns_misuse},
+	{"test_step_after_parent_connection_closed_returns_misuse", test_step_after_parent_connection_closed_returns_misuse},
 
 	// Index bounds (index_bounds_test.odin).
 	{"test_stmt_get_int_negative_index_returns_zero",          test_stmt_get_int_negative_index_returns_zero},

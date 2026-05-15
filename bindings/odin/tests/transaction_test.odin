@@ -181,3 +181,53 @@ test_conn_with_transaction_commit_failure_rollback_recovers :: proc() {
 	parent_count, _, _ := turso.conn_scalar_i64(t.conn, "SELECT COUNT(*) FROM parent")
 	expect_eq(parent_count, i64(1), "recovery transaction must persist its insert")
 }
+
+// Package-level scratch state. Odin proc literals do not capture surrounding
+// locals, so reentrancy observation has to plumb through here.
+@(private="file")
+nested_inner_ok: bool
+
+@(private="file")
+nested_inner_body_ran: bool
+
+// test_conn_with_transaction_reentrancy_inner_begin_errors pins the contract
+// for calling conn_with_transaction from inside an open conn_with_transaction
+// on the same connection. The engine does NOT promote nested BEGIN to a
+// savepoint; SQLite returns "cannot start a transaction within a transaction"
+// and the inner wrapper short-circuits:
+//   1. inner conn_begin fails;
+//   2. inner body never runs;
+//   3. inner ROLLBACK does not fire (the wrapper only rolls back if BEGIN
+//      succeeded and the body chose to abort);
+//   4. inner returns the typed error to the outer body.
+// The outer transaction is therefore unaffected and can commit normally.
+//
+// Callers who want nested transactional scope on the same connection should
+// use conn_with_savepoint, which composes correctly (see
+// test_conn_with_savepoint_nested).
+test_conn_with_transaction_reentrancy_inner_begin_errors :: proc() {
+	t := txn_setup("txn_reentrancy")
+	defer test_db_close(&t)
+
+	nested_inner_ok = true
+	nested_inner_body_ran = false
+
+	outer_err, outer_ok := turso.conn_with_transaction(t.conn, proc(c: turso.Connection) -> bool {
+		_, _, _ = turso.conn_exec(c, "INSERT INTO t(v) VALUES (1)")
+
+		ie, iok := turso.conn_with_transaction(c, proc(c2: turso.Connection) -> bool {
+			nested_inner_body_ran = true
+			return true
+		})
+		nested_inner_ok = iok
+		turso.error_destroy(&ie)
+
+		return true
+	})
+	defer turso.error_destroy(&outer_err)
+
+	expect_no_err(outer_err, outer_ok, "outer transaction must succeed despite the nested BEGIN failing")
+	expect_false(nested_inner_ok, "nested conn_with_transaction must report failure when the outer transaction is already open")
+	expect_false(nested_inner_body_ran, "nested body must not run when BEGIN failed")
+	expect_eq(count_rows(t.conn), i64(1), "outer transaction must commit its writes after the nested wrapper failed")
+}

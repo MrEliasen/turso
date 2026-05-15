@@ -71,3 +71,59 @@ test_http_client_auth_token_is_forwarded :: proc() {
 	expect_true(spy.saw_authorization,
 		"HTTP_Client.auth_token must reach outbound requests when sync.Config.auth_token is empty")
 }
+
+// test_sync_user_data_freed_after_database_close_no_crash pins the contract
+// that the sync engine is pull-based: after sync.database_close returns, the
+// dispatcher will never call HTTP_Client.roundtrip with the now-stale
+// user_data pointer. The caller is therefore free to deallocate a heap
+// HTTP_Client.user_data immediately after database_close.
+//
+// This is the regression pin for the HTTP_Client field lifetime documented in
+// the README's "Sync ownership rules" section. If a future refactor introduced
+// a Rust-side background task that retried HTTP requests after deinit, this
+// test would surface it as either a segfault on the freed spy pointer or a
+// tracking-allocator bad-free when the next allocation reused the slot.
+test_sync_user_data_freed_after_database_close_no_crash :: proc() {
+	dir := make_temp_dir("user_data_lifetime")
+	defer remove_temp_dir(dir)
+
+	// Heap-allocate the spy so the post-close free is meaningful. A stack spy
+	// would not prove anything since its memory is only reclaimed at proc exit.
+	spy := new(Auth_Spy)
+
+	client := sync.HTTP_Client{
+		user_data  = spy,
+		roundtrip  = auth_spy_roundtrip,
+		auth_token = "user-data-lifetime-pin",
+	}
+
+	cfg := sync.Config{
+		path        = db_path(dir),
+		remote_url  = "https://example.invalid",
+		client_name = "user-data-lifetime",
+	}
+	defer delete(cfg.path)
+
+	db, e, ok := sync.database_create(turso.Database_Config{path = cfg.path}, cfg, client)
+	if ok {
+		// Drive one operation so the dispatcher actually reads user_data at
+		// least once. The spy refuses the request which surfaces a typed
+		// error from sync.push; we discard it because the dispatch having
+		// happened is the only thing we care about here.
+		pe, _ := sync.push(db)
+		turso.error_destroy(&pe)
+	} else {
+		turso.error_destroy(&e)
+	}
+
+	// Order matters: close the database FIRST, then free user_data. This is
+	// the contract under test. If the dispatcher tried to call back into
+	// user_data after deinit, the next line would either segfault or surface
+	// a bad-free through the test runner's tracking allocator.
+	sync.database_close(&db)
+	if spy.saw_authorization { delete(spy.authorization) }
+	free(spy)
+
+	// No assertion needed: surviving close + free + the end-of-run leak check
+	// is the pin.
+}

@@ -15,6 +15,8 @@ import raw "raw"
 // are therefore free to throw away their own SQL buffer (e.g. a stack-local
 // fmt.tprintf result) once prepare returns. Error.sql, when set, is likewise
 // owned and freed by error_destroy.
+//
+// C ABI: turso.h:169-177 (turso_connection_prepare_single)
 prepare :: proc(conn: Connection, sql: string) -> (Statement, Error, bool) {
 	if conn.handle == nil {
 		return Statement{}, make_error(.MISUSE, "prepare", "connection is not open", sql), false
@@ -42,6 +44,8 @@ prepare :: proc(conn: Connection, sql: string) -> (Statement, Error, bool) {
 //
 // Ownership rule matches prepare: the returned Statement owns a clone of sql,
 // freed by finalize.
+//
+// C ABI: turso.h:180-191 (turso_connection_prepare_first)
 prepare_first :: proc(conn: Connection, sql: string) -> (stmt: Statement, tail: int, err: Error, ok: bool) {
 	if conn.handle == nil {
 		return Statement{}, 0, make_error(.MISUSE, "prepare_first", "connection is not open", sql), false
@@ -176,6 +180,8 @@ reset :: proc(stmt: Statement) -> (Error, bool) {
 // statements (returned by prepare_cached) MUST NOT be finalized directly;
 // cache_destroy / cache_clear own the lifetime. Calling finalize on a
 // zero-value Statement is a no-op.
+//
+// C ABI: turso.h:233 (turso_statement_finalize) + turso.h:333 (turso_statement_deinit)
 finalize :: proc(stmt: ^Statement) -> (Error, bool) {
 	if stmt == nil || stmt.handle == nil { return error_none(), true }
 	err := error_none()
