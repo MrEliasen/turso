@@ -10,7 +10,7 @@ Shipped:
 - All five SQL value kinds (INTEGER, REAL, TEXT, BLOB, NULL)
 - Column metadata (name, declared type)
 - Multi-statement parsing via `prepare_first`
-- Convenience helpers: `conn_exec`, `conn_exec_args`, `conn_scalar_i64`
+- Convenience helpers: `conn_exec`, `conn_exec_args`, `conn_exec_batch`, `conn_scalar_i64`
 - Encryption (`encryption_cipher` + `encryption_hexkey` in `Database_Config`, requires `experimental_features = "encryption"`)
 - Tracing logger callback (`setup(Setup_Options{log_level, logger})`)
 - Async I/O (`Database_Config.async_io = true`) with transparent `step`/`execute`/`finalize` + explicit `step_once`/`run_io` for event-loop integration
@@ -48,8 +48,8 @@ bindings/odin/
 │   ├── statement.odin      prepare/step/execute/finalize + async step_once/run_io
 │   ├── types.odin          Database, Connection, Statement, Bind_Arg, Log_Event
 │   └── version.odin        version()
-├── tests/                  local-DB test runner (67 tests)
-│   └── sync/               sync test binary (32 tests; built via make sync-test)
+├── tests/                  local-DB test runner
+│   └── sync/               sync test binary (built via make sync-test)
 ├── examples/               minimal + named_params runnable examples
 └── Makefile                build + check + test targets
 ```
@@ -70,8 +70,8 @@ Produces `target/debug/libturso_sdk_kit.{dylib,so,dll}`.
 ```sh
 cd bindings/odin
 make check       # static check (no link)
-make test        # local-DB test suite (67 tests)
-make sync-test   # sync engine test suite (32 tests, builds libturso_sync_sdk_kit; cloud E2E gated by TURSO_TEST_URL / TURSO_TEST_TOKEN)
+make test        # local-DB test suite
+make sync-test   # sync engine test suite (builds libturso_sync_sdk_kit; cloud E2E gated by TURSO_TEST_URL / TURSO_TEST_TOKEN)
 make example     # runs examples/minimal
 make examples    # runs every example
 ```
@@ -99,9 +99,14 @@ DYLD_LIBRARY_PATH=$(pwd)/../../target/debug odin run examples/minimal
 LD_LIBRARY_PATH=$(pwd)/../../target/debug odin run examples/minimal
 ```
 
-### Windows
+### Windows (best-effort, not in CI)
 
-Copy `target/debug/turso_sdk_kit.dll` next to the produced `.exe`, or place it on `PATH`.
+The foreign imports include Windows branches and the dylib resolution rule is
+to copy `target/debug/turso_sdk_kit.dll` next to the produced `.exe`, or place
+it on `PATH`. CI runs on Linux + macOS only; the Makefile does not build a
+Windows target and `turso/sync/file_io.odin` uses POSIX-style path separators,
+so the sync engine is untested on Windows. Local DB use cases should work; if
+you find a regression on Windows, open an issue.
 
 ## API tour
 
@@ -147,6 +152,8 @@ main :: proc() {
 - `Error.message` AND `Error.sql` are owned by the Error (cloned at construction). Call `error_destroy(&err)` to free both. `Error.ctx` is borrowed (caller's static literal).
 - `bind_text` / `bind_blob` payloads are copied by Turso during the call - caller's data does not need to outlive the bind.
 - `encryption_hexkey` in `Database_Config` is NOT copied or scrubbed by the binding. If you need the key wiped after `database_open` returns, allocate it yourself and zero the buffer after the call.
+- **Cleanup ordering**: finalize every `Statement` (or `cache_destroy` the cache that owns them) BEFORE you `conn_close` the source connection, and `conn_close` every `Connection` BEFORE you `database_close` the source database. Engine handles point into resources that the parent owns; reversing the order is undefined behavior per `sdk-kit/turso.h:194`.
+- `conn_exec` and `conn_exec_args` compile only the first statement; trailing text is discarded silently. Use `conn_exec_batch` to run a multi-statement script.
 
 ## Threading
 

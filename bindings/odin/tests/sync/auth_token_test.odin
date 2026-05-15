@@ -8,11 +8,11 @@ import sync "../../turso/sync"
 // Tests that the auth_token a caller sets via curlhttp.client / stub_client
 // (HTTP_Client.auth_token) is actually injected on outbound HTTP requests.
 //
-// As of the current branch, HTTP_Client.auth_token is dead code: the
-// dispatcher in turso/sync/io_loop.odin (dispatch_http) reads
-// `db.config.auth_token` from sync.Config, never `client.auth_token`. So if a
-// caller sets the token on the client but forgets cfg.auth_token, requests
-// go out unauthenticated.
+// Contract: sync.Config.auth_token takes precedence; when it is empty the
+// dispatcher in turso/sync/io_loop.odin (dispatch_http) falls back to
+// HTTP_Client.auth_token. This test pins the fallback path so a caller who
+// sets the token only on the client (the natural place per curlhttp.client's
+// signature) still gets an Authorization: Bearer header on every request.
 
 @(private="file")
 Auth_Spy :: struct {
@@ -36,10 +36,8 @@ auth_spy_roundtrip :: proc(user_data: rawptr, req: sync.HTTP_Request, allocator:
 
 // test_http_client_auth_token_is_forwarded sets the token ONLY on the
 // HTTP_Client (the natural place per curlhttp.client's signature) and leaves
-// sync.Config.auth_token empty. Expectation: outbound HTTP carries the
-// Authorization header. Actual: header is missing (dead-code path on
-// HTTP_Client.auth_token). This test SHOULD pass after the dispatcher is
-// fixed to fall back to client.auth_token when cfg.auth_token is empty.
+// sync.Config.auth_token empty. The dispatcher must fall back to the
+// client's token so outbound HTTP carries an Authorization header.
 test_http_client_auth_token_is_forwarded :: proc() {
 	dir := make_temp_dir("auth_token_forward")
 	defer remove_temp_dir(dir)

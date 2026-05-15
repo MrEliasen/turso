@@ -10,6 +10,14 @@ import "core:strings"
 // (statements are per-connection in Turso); multiple goroutines sharing one
 // connection+cache must serialize access.
 //
+// Lifetime: cache_destroy MUST be called BEFORE the source Connection is
+// closed. The cached statement handles point into engine memory owned by that
+// connection; closing the connection first leaves the cache pointing at freed
+// state. The test suite has a regression assertion for this ordering
+// (test_cache_destroy_after_connection_close_does_not_crash); if a future
+// engine change makes the reverse order fatal, this contract will need
+// enforcement (e.g. a back-reference + assert) rather than just documentation.
+//
 // Schema changes: if you ALTER/DROP a table that a cached statement references,
 // clear the cache first - stale plans may misbehave.
 Stmt_Cache :: struct {

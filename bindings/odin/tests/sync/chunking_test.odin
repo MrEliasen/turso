@@ -1,6 +1,5 @@
 package sync_tests
 
-import "core:fmt"
 import sync_pkg "../../turso/sync"
 
 // Unit tests for sync_pkg.http_response_chunks — the pure helper that splits a
@@ -68,7 +67,4 @@ test_http_response_chunks_reassembly_matches_body :: proc() {
 				args = []any{i, reassembled[i], body[i]})
 		}
 	}
-	// Touch the unused fmt import via a no-op format call (linter would
-	// otherwise flag fmt as unused; keep parity with sibling tests).
-	_ = fmt.tprintf("ok")
 }

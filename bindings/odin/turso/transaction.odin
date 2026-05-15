@@ -88,37 +88,51 @@ conn_rollback_to :: proc(conn: Connection, name: string) -> (Error, bool) {
 // never called. If COMMIT fails after a successful body, the surfaced error
 // is the commit error and the transaction has been rolled back implicitly
 // by the engine.
+//
+// When the body returns false the wrapper runs ROLLBACK eagerly and surfaces
+// any error from it rather than swallowing — a rollback that fails leaves
+// the transaction in an unknown state, which the caller needs to know about.
 conn_with_transaction :: proc(conn: Connection, body: proc(conn: Connection) -> bool) -> (Error, bool) {
 	if e, ok := conn_begin(conn); !ok { return e, false }
-	committed := false
-	defer if !committed {
-		_, _ = conn_rollback(conn)
-	}
+
 	if !body(conn) {
-		return error_none(), true
+		return conn_rollback(conn)
 	}
+
 	e, ok := conn_commit(conn)
 	if !ok { return e, false }
-	committed = true
 	return error_none(), true
 }
 
 // conn_with_savepoint wraps `body` between SAVEPOINT name and RELEASE name.
 // Returns true to release (commit savepoint work), false to roll back to
 // the savepoint and then release it (discarding the body's writes).
+//
+// If the body returns false, both ROLLBACK TO and RELEASE run; the first
+// non-OK error from either is surfaced rather than silently swallowed so the
+// caller can react to a savepoint stack that drifted out of sync.
 conn_with_savepoint :: proc(conn: Connection, name: string, body: proc(conn: Connection) -> bool) -> (Error, bool) {
 	if e, ok := conn_savepoint(conn, name); !ok { return e, false }
-	released := false
-	defer if !released {
-		_, _ = conn_rollback_to(conn, name)
-		_, _ = conn_release(conn, name)
-	}
+
 	if !body(conn) {
+		// Discard the body's writes. ROLLBACK TO does not pop the savepoint
+		// per SQLite semantics, so RELEASE must follow to remove the entry
+		// from the stack. We surface the first error we hit.
+		rb_err, rb_ok := conn_rollback_to(conn, name)
+		rel_err, rel_ok := conn_release(conn, name)
+		if !rb_ok {
+			error_destroy(&rel_err)
+			return rb_err, false
+		}
+		if !rel_ok {
+			error_destroy(&rb_err)
+			return rel_err, false
+		}
 		return error_none(), true
 	}
+
 	e, ok := conn_release(conn, name)
 	if !ok { return e, false }
-	released = true
 	return error_none(), true
 }
 

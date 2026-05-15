@@ -19,10 +19,12 @@ package raw
 // foreign import; the Makefile's `sync-test` target does this for you.
 USE_SYNC_DYLIB :: #config(TURSO_USE_SYNC_DYLIB, false)
 
+// Supported platforms (CI: blacksmith-4vcpu-ubuntu-2404 + blacksmith-6vcpu-macos-latest):
+//   .Darwin, .Linux. Other Odin-supported OSes are listed below as a courtesy
+//   for downstream builds but are not covered by CI; the Makefile and
+//   turso/sync/file_io.odin only handle Darwin / Linux.
 when USE_SYNC_DYLIB {
-	when ODIN_OS == .Windows {
-		foreign import turso "system:turso_sync_sdk_kit.dll"
-	} else when ODIN_OS == .Darwin {
+	when ODIN_OS == .Darwin {
 		foreign import turso "system:turso_sync_sdk_kit"
 	} else when ODIN_OS == .Linux {
 		foreign import turso "system:turso_sync_sdk_kit"
@@ -30,11 +32,13 @@ when USE_SYNC_DYLIB {
 		foreign import turso "system:turso_sync_sdk_kit"
 	} else when ODIN_OS == .OpenBSD {
 		foreign import turso "system:turso_sync_sdk_kit"
+	} else when ODIN_OS == .Windows {
+		foreign import turso "system:turso_sync_sdk_kit.dll"
+	} else {
+		#panic("turso/raw: unsupported ODIN_OS; add a foreign import branch here")
 	}
 } else {
-	when ODIN_OS == .Windows {
-		foreign import turso "system:turso_sdk_kit.dll"
-	} else when ODIN_OS == .Darwin {
+	when ODIN_OS == .Darwin {
 		foreign import turso "system:turso_sdk_kit"
 	} else when ODIN_OS == .Linux {
 		foreign import turso "system:turso_sdk_kit"
@@ -42,6 +46,10 @@ when USE_SYNC_DYLIB {
 		foreign import turso "system:turso_sdk_kit"
 	} else when ODIN_OS == .OpenBSD {
 		foreign import turso "system:turso_sdk_kit"
+	} else when ODIN_OS == .Windows {
+		foreign import turso "system:turso_sdk_kit.dll"
+	} else {
+		#panic("turso/raw: unsupported ODIN_OS; add a foreign import branch here")
 	}
 }
 

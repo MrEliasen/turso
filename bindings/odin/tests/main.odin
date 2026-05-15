@@ -85,6 +85,12 @@ ALL_TESTS := [?]Test_Entry{
 	{"test_cache_distinct_sql_get_distinct_entries", test_cache_distinct_sql_get_distinct_entries},
 	{"test_cache_clear_releases_entries",         test_cache_clear_releases_entries},
 
+	// row_mapping_query_all_leak_test.odin: cleanup on partial failure for
+	// conn_query_all_struct / conn_query_one_struct / conn_query_optional_struct.
+	{"test_query_all_struct_frees_partial_rows_on_type_mismatch", test_query_all_struct_frees_partial_rows_on_type_mismatch},
+	{"test_query_one_struct_frees_out_on_too_many_rows",          test_query_one_struct_frees_out_on_too_many_rows},
+	{"test_query_optional_struct_frees_out_on_too_many_rows",     test_query_optional_struct_frees_out_on_too_many_rows},
+
 	// New audit tests — see savepoint_quoting_test.odin / row_mapping_partial_leak_test.odin /
 	// error_sql_leak_test.odin.
 	{"test_savepoint_name_with_injection_payload",     test_savepoint_name_with_injection_payload},
@@ -117,6 +123,47 @@ ALL_TESTS := [?]Test_Entry{
 	// Send+Sync contract on Database under TSAN and confirms cross-connection
 	// state visibility on a normal build.
 	{"test_two_connections_two_threads",                      test_two_connections_two_threads},
+
+	// Value boundaries (value_boundary_test.odin).
+	{"test_bind_int_boundary_i64_min",        test_bind_int_boundary_i64_min},
+	{"test_bind_int_boundary_i64_max",        test_bind_int_boundary_i64_max},
+	{"test_bind_double_special_values",       test_bind_double_special_values},
+	{"test_bind_double_nan_does_not_crash",   test_bind_double_nan_does_not_crash},
+	{"test_bind_blob_one_mb_roundtrip",       test_bind_blob_one_mb_roundtrip},
+
+	// Text handling (text_handling_test.odin).
+	{"test_bind_text_unicode_roundtrip",              test_bind_text_unicode_roundtrip},
+	{"test_bind_text_with_embedded_nul_roundtrip",    test_bind_text_with_embedded_nul_roundtrip},
+	{"test_column_name_utf8_alias",                   test_column_name_utf8_alias},
+
+	// Closed-handle MISUSE (closed_handle_test.odin).
+	{"test_step_on_closed_statement_returns_misuse",       test_step_on_closed_statement_returns_misuse},
+	{"test_bind_on_closed_statement_returns_misuse",       test_bind_on_closed_statement_returns_misuse},
+	{"test_prepare_on_closed_connection_returns_misuse",   test_prepare_on_closed_connection_returns_misuse},
+	{"test_exec_on_closed_connection_returns_misuse",      test_exec_on_closed_connection_returns_misuse},
+	{"test_connect_on_closed_database_returns_misuse",     test_connect_on_closed_database_returns_misuse},
+
+	// Index bounds (index_bounds_test.odin).
+	{"test_stmt_get_int_negative_index_returns_zero",          test_stmt_get_int_negative_index_returns_zero},
+	{"test_stmt_get_text_negative_index_returns_empty",        test_stmt_get_text_negative_index_returns_empty},
+	{"test_stmt_column_name_negative_index_returns_empty",     test_stmt_column_name_negative_index_returns_empty},
+	{"test_stmt_param_name_non_positive_index_returns_empty",  test_stmt_param_name_non_positive_index_returns_empty},
+
+	// Constraint violations (constraint_test.odin).
+	{"test_unique_constraint_violation_returns_constraint_code",    test_unique_constraint_violation_returns_constraint_code},
+	{"test_not_null_constraint_violation_returns_constraint_code",  test_not_null_constraint_violation_returns_constraint_code},
+	{"test_check_constraint_violation_returns_constraint_code",     test_check_constraint_violation_returns_constraint_code},
+	{"test_constraint_error_carries_failing_sql",                   test_constraint_error_carries_failing_sql},
+
+	// Cache lifetime (cache_lifetime_test.odin).
+	{"test_cache_destroy_after_connection_close_does_not_crash",  test_cache_destroy_after_connection_close_does_not_crash},
+	{"test_cached_statement_survives_schema_change",              test_cached_statement_survives_schema_change},
+
+	// Multi-statement exec (exec_batch_test.odin).
+	{"test_exec_batch_runs_ddl_plus_inserts",                  test_exec_batch_runs_ddl_plus_inserts},
+	{"test_exec_batch_stops_on_error",                         test_exec_batch_stops_on_error},
+	{"test_exec_batch_on_closed_connection_returns_misuse",    test_exec_batch_on_closed_connection_returns_misuse},
+	{"test_exec_batch_with_only_whitespace_succeeds",          test_exec_batch_with_only_whitespace_succeeds},
 }
 
 main :: proc() {

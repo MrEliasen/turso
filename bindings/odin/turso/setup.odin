@@ -53,14 +53,21 @@ g_setup_ctx_store :: proc(ctx: runtime.Context) {
 	intrinsics.atomic_store(&g_setup_ctx_seq, s + 2)  // even: writer exited
 }
 
+// LOGGER_SEQLOCK_MAX_RETRIES caps how many times g_setup_ctx_load will spin
+// while a writer is mid-publish before giving up and signalling the trampoline
+// to drop the event. The bound exists so a misbehaving setup() loop cannot
+// pin the emitting thread; under realistic contention the loop converges in
+// one or two iterations.
+@(private)
+LOGGER_SEQLOCK_MAX_RETRIES :: 8
+
 // g_setup_ctx_load returns the latest published Context, or ok=false when a
 // writer is mid-publish (and the trampoline should drop the event rather than
 // risk a torn read). Bounded retries so a misbehaving writer cannot pin the
 // trampoline in a spin.
 @(private)
 g_setup_ctx_load :: proc "contextless" () -> (runtime.Context, bool) {
-	MAX_RETRIES :: 8
-	for _ in 0 ..< MAX_RETRIES {
+	for _ in 0 ..< LOGGER_SEQLOCK_MAX_RETRIES {
 		s1 := intrinsics.atomic_load(&g_setup_ctx_seq)
 		if s1 & 1 == 1 { continue }
 		ctx := g_setup_ctx

@@ -106,7 +106,12 @@ Scan_Plan :: struct {
 
 // conn_query_one_struct prepares + binds + steps `sql`, expects exactly one
 // row, and scans it into `out`. Returns an error for zero or two+ rows.
-conn_query_one_struct :: proc(conn: Connection, sql: string, out: ^$T, args: ..Bind_Arg) -> (Error, bool) {
+//
+// `allocator` is forwarded to stmt_scan_struct for TEXT/BLOB allocations. On
+// the two+ rows error path the binding releases the just-scanned fields so
+// `out^` is restored to a zero struct rather than leaking owned memory the
+// caller never gets a chance to free.
+conn_query_one_struct :: proc(conn: Connection, sql: string, out: ^$T, args: ..Bind_Arg, allocator := context.allocator) -> (Error, bool) {
 	stmt, e1, ok1 := prepare(conn, sql)
 	if !ok1 { return e1, false }
 	defer { _, _ = finalize(&stmt) }
@@ -121,10 +126,11 @@ conn_query_one_struct :: proc(conn: Connection, sql: string, out: ^$T, args: ..B
 		return make_error(.ERROR, "conn_query_one_struct", "expected exactly one row, got zero", sql), false
 	}
 
-	if se, sok := stmt_scan_struct(stmt, out); !sok { return se, false }
+	if se, sok := stmt_scan_struct(stmt, out, allocator); !sok { return se, false }
 
 	sr2, _, _ := step(stmt)
 	if sr2 == .Row {
+		free_owned_out(out, allocator)
 		return make_error(.ERROR, "conn_query_one_struct", "expected exactly one row, got multiple", sql), false
 	}
 	return error_none(), true
@@ -132,7 +138,7 @@ conn_query_one_struct :: proc(conn: Connection, sql: string, out: ^$T, args: ..B
 
 // conn_query_optional_struct is like conn_query_one_struct but tolerates zero
 // rows: `found=false, ok=true` on no match. Two+ rows is still an error.
-conn_query_optional_struct :: proc(conn: Connection, sql: string, out: ^$T, args: ..Bind_Arg) ->
+conn_query_optional_struct :: proc(conn: Connection, sql: string, out: ^$T, args: ..Bind_Arg, allocator := context.allocator) ->
 	(found: bool, err: Error, ok: bool) {
 	stmt, e1, ok1 := prepare(conn, sql)
 	if !ok1 { return false, e1, false }
@@ -146,19 +152,36 @@ conn_query_optional_struct :: proc(conn: Connection, sql: string, out: ^$T, args
 	if !ok3 { return false, e3, false }
 	if sr != .Row { return false, error_none(), true }
 
-	if se, sok := stmt_scan_struct(stmt, out); !sok { return false, se, false }
+	if se, sok := stmt_scan_struct(stmt, out, allocator); !sok { return false, se, false }
 
 	sr2, _, _ := step(stmt)
 	if sr2 == .Row {
+		free_owned_out(out, allocator)
 		return false, make_error(.ERROR, "conn_query_optional_struct", "expected at most one row, got multiple", sql), false
 	}
 	return true, error_none(), true
 }
 
+// free_owned_out releases any TEXT/BLOB field allocated into a `^T` by
+// stmt_scan_struct. No-op when T is not a struct (the scan itself would have
+// returned MISUSE before allocating, so there is nothing to free).
+@(private)
+free_owned_out :: proc(out: ^$T, allocator: mem.Allocator) {
+	ti := runtime.type_info_base(type_info_of(T))
+	s, is_struct := ti.variant.(runtime.Type_Info_Struct)
+	if !is_struct { return }
+	free_owned_row_fields(rawptr(out), s, allocator)
+}
+
 // conn_query_all_struct runs `sql` and scans every row into a caller-owned
 // []T. T is passed explicitly because there's no input value to deduce
 // from; usage: `rows, e, ok := turso.conn_query_all_struct(User_Row, conn, sql, bind_int(5))`.
-conn_query_all_struct :: proc($T: typeid, conn: Connection, sql: string, args: ..Bind_Arg) ->
+//
+// `allocator` is used both for the returned slice and for TEXT/BLOB fields
+// inside each row. On error every row already scanned has its owned
+// string/blob fields released through the same allocator before the function
+// returns, so the caller never has to clean up a partial result.
+conn_query_all_struct :: proc($T: typeid, conn: Connection, sql: string, args: ..Bind_Arg, allocator := context.allocator) ->
 	(rows: []T, err: Error, ok: bool) {
 	stmt, e1, ok1 := prepare(conn, sql)
 	if !ok1 { return nil, e1, false }
@@ -168,18 +191,70 @@ conn_query_all_struct :: proc($T: typeid, conn: Connection, sql: string, args: .
 		if e2, ok2 := stmt_bind_args(stmt, ..args); !ok2 { return nil, e2, false }
 	}
 
-	out: [dynamic]T
+	out := make([dynamic]T, 0, 0, allocator)
 	for {
 		sr, e3, ok3 := step(stmt)
-		if !ok3 { delete(out); return nil, e3, false }
+		if !ok3 {
+			free_partial_rows(&out, allocator)
+			return nil, e3, false
+		}
 		if sr != .Row { break }
 		row: T
-		if se, sok := stmt_scan_struct(stmt, &row); !sok {
-			delete(out); return nil, se, false
+		if se, sok := stmt_scan_struct(stmt, &row, allocator); !sok {
+			free_partial_rows(&out, allocator)
+			return nil, se, false
 		}
 		append(&out, row)
 	}
 	return out[:], error_none(), true
+}
+
+// free_partial_rows walks an already-populated [dynamic]T and frees any
+// string/[]u8 field that the row-mapping layer allocated. Used by
+// conn_query_all_struct to clean up on error so the caller never sees a
+// partially-populated slice with owned fields still alive.
+@(private)
+free_partial_rows :: proc(out: ^[dynamic]$T, allocator: mem.Allocator) {
+	ti := runtime.type_info_base(type_info_of(T))
+	s, is_struct := ti.variant.(runtime.Type_Info_Struct)
+	if !is_struct {
+		delete(out^)
+		return
+	}
+	for &row in out^ {
+		free_owned_row_fields(rawptr(&row), s, allocator)
+	}
+	delete(out^)
+}
+
+// free_owned_row_fields releases TEXT and BLOB fields the row-mapping layer
+// populated via the caller's allocator. Skips other field kinds (integers,
+// floats, booleans, cstrings, anything non-`string` non-`[]u8`) because they
+// hold no allocations. Safe on a zero struct: empty strings/slices are no-ops.
+@(private)
+free_owned_row_fields :: proc(row_ptr: rawptr, s: runtime.Type_Info_Struct, allocator: mem.Allocator) {
+	field_count := int(s.field_count)
+	for j in 0 ..< field_count {
+		field_type := s.types[j]
+		base := runtime.type_info_base(field_type)
+		field_ptr := rawptr(uintptr(row_ptr) + s.offsets[j])
+		#partial switch v in base.variant {
+		case runtime.Type_Info_String:
+			if v.is_cstring { continue }
+			str := (^string)(field_ptr)^
+			if len(str) > 0 {
+				delete(str, allocator)
+				(^string)(field_ptr)^ = ""
+			}
+		case runtime.Type_Info_Slice:
+			if v.elem.id != u8 { continue }
+			b := (^[]u8)(field_ptr)^
+			if len(b) > 0 {
+				delete(b, allocator)
+				(^[]u8)(field_ptr)^ = nil
+			}
+		}
+	}
 }
 
 @(private)
