@@ -21,6 +21,7 @@ use crate::{
     parse_schema_rows,
     progress::{ProgressHandler, ProgressHandlerCallback},
     refresh_analyze_stats, translate,
+    translate::collate::CollationSeq,
     util::IOExt,
     vdbe, AllViewsTxState, AtomicCipherMode, AtomicSyncMode, AtomicTempStore, BusyHandler,
     BusyHandlerCallback, CaptureDataChangesInfo, CheckpointMode, CheckpointResult, CipherMode, Cmd,
@@ -34,6 +35,7 @@ use crate::{MAIN_DB_ID, TEMP_DB_ID};
 use arc_swap::ArcSwap;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use smallvec::SmallVec;
+use std::cmp::Ordering as CmpOrdering;
 use std::fmt::Display;
 use std::ops::Deref;
 #[cfg(feature = "simulator")]
@@ -196,6 +198,7 @@ pub struct Connection {
     /// Attached databases
     pub(super) attached_databases: RwLock<DatabaseCatalog>,
     pub(super) query_only: AtomicBool,
+    pub(super) vdbe_trace: AtomicBool,
     /// If enabled, the UPDATE/DELETE statements must have a WHERE clause
     pub(super) dml_require_where: AtomicBool,
     /// SQLite DQS misfeature: when ON (default), unresolved double-quoted identifiers
@@ -205,6 +208,8 @@ pub struct Connection {
     pub(super) full_column_names: AtomicBool,
     /// Deprecated pragma: when ON (default), column refs use just the column name
     pub(super) short_column_names: AtomicBool,
+    /// Per-connection runtime extension loading flag.
+    pub(super) enable_load_extension: AtomicBool,
     pub(crate) mv_tx: RwLock<Option<(crate::mvcc::database::TxID, TransactionMode)>>,
     /// Per-attached-database MVCC transactions.
     /// Main DB uses `mv_tx` above for zero-cost hot path access.
@@ -1329,17 +1334,54 @@ impl Connection {
         }
         let current_schema = self.schema.read().clone();
         let schema = self.db.schema.lock();
-        if matches!(self.get_tx_state(), TransactionState::None)
-            && self.get_mv_tx().is_none()
-            && self.next_attached_mv_tx().is_none()
-            // In MVCC, checkpoint root publication can replace Database::schema
-            // without changing SQLite's schema cookie. If this connection
-            // still holds an older Schema snapshot, prepared statements must be
-            // invalidated and recompiled against the current roots.
+        // MVCC checkpoint can publish physical btree roots into the shared
+        // schema without changing SQLite's schema cookie. If this connection
+        // still has the older schema snapshot, prepared statements must be
+        // invalidated and recompiled with the published roots.
+        if self.has_no_open_transaction_state()
             && (current_schema.schema_version != schema.schema_version
-                || (self.mvcc_enabled() && !Arc::ptr_eq(&current_schema, &schema)))
+                || self
+                    .has_mvcc_schema_snapshot_changed_with_same_version(&current_schema, &schema))
         {
             *self.schema.write() = schema.clone();
+            self.bump_prepare_context_generation();
+        }
+    }
+
+    fn has_no_open_transaction_state(&self) -> bool {
+        matches!(self.get_tx_state(), TransactionState::None)
+            && self.get_mv_tx().is_none()
+            && self.next_attached_mv_tx().is_none()
+    }
+
+    fn has_mvcc_schema_snapshot_changed_with_same_version(
+        &self,
+        current_schema: &Arc<Schema>,
+        schema: &Arc<Schema>,
+    ) -> bool {
+        self.mvcc_enabled()
+            && current_schema.schema_version == schema.schema_version
+            && !Arc::ptr_eq(current_schema, schema)
+    }
+
+    pub(crate) fn mvcc_schema_requires_reprepare_before_tx(&self) -> bool {
+        if !self.has_no_open_transaction_state() {
+            return false;
+        }
+        let current_schema = self.schema.read().clone();
+        let schema = self.db.schema.lock();
+        self.has_mvcc_schema_snapshot_changed_with_same_version(&current_schema, &schema)
+    }
+
+    pub(crate) fn refresh_schema_from_shared_for_reprepare(&self) {
+        let current_schema = self.schema.read().clone();
+        let schema = self.db.schema.lock().clone();
+        if current_schema.schema_version < schema.schema_version
+            || (self.has_no_open_transaction_state()
+                && self
+                    .has_mvcc_schema_snapshot_changed_with_same_version(&current_schema, &schema))
+        {
+            *self.schema.write() = schema;
             self.bump_prepare_context_generation();
         }
     }
@@ -1781,16 +1823,7 @@ impl Connection {
     }
 
     pub fn get_database_canonical_path(&self) -> String {
-        if self.db.is_in_memory_db() {
-            // For in-memory databases, SQLite shows empty string
-            String::new()
-        } else {
-            // For file databases, try show the full absolute path if that doesn't fail
-            match std::fs::canonicalize(&self.db.path) {
-                Ok(abs_path) => abs_path.to_string_lossy().to_string(),
-                Err(_) => self.db.path.to_string(),
-            }
-        }
+        self.db.get_database_canonical_path()
     }
 
     /// Check if a specific attached database is read only or not, by its index
@@ -1870,6 +1903,14 @@ impl Connection {
 
     pub fn get_auto_commit(&self) -> bool {
         self.auto_commit.load(Ordering::SeqCst)
+    }
+
+    pub fn set_load_extension_enabled(&self, enabled: bool) {
+        self.enable_load_extension.store(enabled, Ordering::Release);
+    }
+
+    pub(crate) fn can_load_extensions(&self) -> bool {
+        self.enable_load_extension.load(Ordering::Acquire)
     }
 
     pub fn reparse_schema_after_extension_load(self: &Arc<Connection>) -> Result<()> {
@@ -2763,6 +2804,14 @@ impl Connection {
         self.bump_prepare_context_generation();
     }
 
+    pub fn set_vdbe_trace(&self, value: bool) {
+        self.vdbe_trace.store(value, Ordering::SeqCst);
+    }
+
+    pub fn get_vdbe_trace(&self) -> bool {
+        self.vdbe_trace.load(Ordering::SeqCst)
+    }
+
     pub fn get_dml_require_where(&self) -> bool {
         self.dml_require_where.load(Ordering::SeqCst)
     }
@@ -2864,21 +2913,123 @@ impl Connection {
         self.syms.read().vtab_modules.keys().cloned().collect()
     }
 
-    /// Returns external (extension) functions: (name, is_aggregate, argc)
-    pub fn get_syms_functions(&self) -> Vec<(String, bool, i32)> {
+    /// Returns external (extension) functions: (name, is_aggregate, argc, deterministic)
+    pub fn get_syms_functions(&self) -> Vec<(String, bool, i32, bool)> {
         self.syms
             .read()
             .functions
             .values()
             .map(|f| {
-                let is_agg = matches!(f.func, function::ExtFunc::Aggregate { .. });
+                let is_agg = f.func.is_aggregate();
                 let argc = match &f.func {
-                    function::ExtFunc::Aggregate { argc, .. } => *argc as i32,
-                    function::ExtFunc::Scalar(_) => -1,
+                    function::ExtFunc::Aggregate { argc, .. } => *argc,
+                    function::ExtFunc::Scalar { argc, .. } => *argc,
                 };
-                (f.name.clone(), is_agg, argc)
+                (
+                    f.name.clone(),
+                    is_agg,
+                    argc,
+                    function::Deterministic::is_deterministic(f.as_ref()),
+                )
             })
             .collect()
+    }
+
+    pub fn register_external_collation(
+        &self,
+        name: String,
+        context: usize,
+        callback: crate::ContextCollationFunction,
+        context_destructor: Option<crate::ContextDestructor>,
+    ) {
+        let collation = CollationSeq::custom(&name);
+        let normalized_name = crate::util::normalize_ident(&name);
+        self.syms.write().collations.insert(
+            collation.id(),
+            Arc::new(function::ExternalCollation::new(
+                normalized_name,
+                context,
+                callback,
+                context_destructor,
+            )),
+        );
+        self.bump_prepare_context_generation();
+    }
+
+    pub fn unregister_external_collation(&self, name: &str) {
+        if let Some(collation) = CollationSeq::known_custom(name) {
+            if self
+                .syms
+                .write()
+                .collations
+                .remove(&collation.id())
+                .is_some()
+            {
+                self.bump_prepare_context_generation();
+            }
+        }
+    }
+
+    pub(crate) fn get_external_collation(
+        &self,
+        collation: CollationSeq,
+    ) -> Result<Arc<function::ExternalCollation>> {
+        self.syms
+            .read()
+            .collations
+            .get(&collation.id())
+            .cloned()
+            .ok_or_else(|| {
+                LimboError::ParseError(format!("no such collation sequence: {}", collation.name()))
+            })
+    }
+
+    pub(crate) fn custom_collation_compare(
+        external: &function::ExternalCollation,
+        left: &str,
+        right: &str,
+    ) -> CmpOrdering {
+        let result = unsafe {
+            (external.callback)(
+                external.context,
+                left.as_ptr(),
+                left.len(),
+                right.as_ptr(),
+                right.len(),
+            )
+        };
+        result.cmp(&0)
+    }
+
+    pub(crate) fn external_collation_comparator(
+        external: Arc<function::ExternalCollation>,
+    ) -> crate::vdbe::sorter::SortComparator {
+        Arc::new(move |left, right| {
+            Ok(match (left, right) {
+                (crate::ValueRef::Text(left), crate::ValueRef::Text(right)) => {
+                    Self::custom_collation_compare(&external, left.as_str(), right.as_str())
+                }
+                _ => left.partial_cmp(right).unwrap_or(CmpOrdering::Equal),
+            })
+        })
+    }
+
+    pub(crate) fn make_collation_comparator(
+        &self,
+        collation: CollationSeq,
+    ) -> Result<crate::vdbe::sorter::SortComparator> {
+        let external = self.get_external_collation(collation)?;
+        Ok(Self::external_collation_comparator(external))
+    }
+
+    pub(crate) fn compare_external_collation(
+        &self,
+        collation: CollationSeq,
+        left: &str,
+        right: &str,
+    ) -> Result<CmpOrdering> {
+        let external = self.get_external_collation(collation)?;
+        Ok(Self::custom_collation_compare(&external, left, right))
     }
 
     pub(crate) fn database_ptr(&self) -> usize {
@@ -3344,6 +3495,7 @@ pub type StepResult = vdbe::StepResult;
 #[derive(Default)]
 pub struct SymbolTable {
     pub functions: HashMap<String, Arc<function::ExternalFunc>>,
+    pub collations: HashMap<u32, Arc<function::ExternalCollation>>,
     pub vtabs: HashMap<String, Arc<VirtualTable>>,
     pub vtab_modules: HashMap<String, Arc<crate::ext::VTabImpl>>,
     pub index_methods: HashMap<String, Arc<dyn IndexMethod>>,
@@ -3353,6 +3505,7 @@ impl std::fmt::Debug for SymbolTable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SymbolTable")
             .field("functions", &self.functions)
+            .field("collations", &self.collations)
             .finish()
     }
 }
@@ -3383,6 +3536,7 @@ impl SymbolTable {
     pub fn new() -> Self {
         Self {
             functions: HashMap::default(),
+            collations: HashMap::default(),
             vtabs: HashMap::default(),
             vtab_modules: HashMap::default(),
             index_methods: HashMap::default(),
@@ -3391,14 +3545,32 @@ impl SymbolTable {
     pub fn resolve_function(
         &self,
         name: &str,
-        _arg_count: usize,
+        arg_count: usize,
     ) -> Option<Arc<function::ExternalFunc>> {
-        self.functions.get(name).cloned()
+        self.functions
+            .get(name)
+            .cloned()
+            .or_else(|| {
+                self.functions
+                    .get(&crate::util::normalize_ident(name))
+                    .cloned()
+            })
+            .filter(|func| func.func.matches_arg_count(arg_count))
+    }
+
+    pub fn resolve_collation(&self, name: &str) -> Option<CollationSeq> {
+        let collation = CollationSeq::known_custom(name)?;
+        self.collations
+            .contains_key(&collation.id())
+            .then_some(collation)
     }
 
     pub fn extend(&mut self, other: &SymbolTable) {
         for (name, func) in &other.functions {
             self.functions.insert(name.clone(), func.clone());
+        }
+        for (id, collation) in &other.collations {
+            self.collations.insert(*id, collation.clone());
         }
         for (name, vtab) in &other.vtabs {
             self.vtabs.insert(name.clone(), vtab.clone());
