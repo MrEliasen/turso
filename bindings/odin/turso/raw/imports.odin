@@ -130,6 +130,39 @@ Database_Config :: struct {
 	encryption_hexkey:     cstring,  // nil in v1
 }
 
+// Compile-time layout asserts. These pin the byte layout of the three FFI
+// structs against the C ABI (turso.h) so an accidental field reorder, resize,
+// or insertion fails `odin check` instead of corrupting memory at the FFI
+// boundary. The expected values are for the supported 64-bit targets (Linux
+// x86-64, macOS arm64), where: pointer/cstring/rawptr = 8 bytes, u64 = 8,
+// `uint` = 8, and an `enum i32` = 4. If the C header legitimately changes,
+// re-verify against turso.h, re-pin these numbers, and re-run `make check-abi`.
+//
+// Setup_Config (turso_config_t, turso.h:87-94): logger ptr @0, log_level @8.
+#assert(size_of(Setup_Config) == 16)
+#assert(offset_of(Setup_Config, logger) == 0)
+#assert(offset_of(Setup_Config, log_level) == 8)
+
+// Log_Struct (turso_log_t, turso.h:74-85): three cstrings, a u64, a uint, then
+// an i32 enum. Trailing enum (4 bytes @40) pads the struct out to 48.
+#assert(size_of(Log_Struct) == 48)
+#assert(offset_of(Log_Struct, message) == 0)
+#assert(offset_of(Log_Struct, target) == 8)
+#assert(offset_of(Log_Struct, file) == 16)
+#assert(offset_of(Log_Struct, timestamp) == 24)
+#assert(offset_of(Log_Struct, line) == 32)
+#assert(offset_of(Log_Struct, level) == 40)
+
+// Database_Config (turso_database_config_t, turso.h:96-127): a u64 followed by
+// five cstrings, all 8-byte aligned, so every field is at an 8-byte boundary.
+#assert(size_of(Database_Config) == 48)
+#assert(offset_of(Database_Config, async_io) == 0)
+#assert(offset_of(Database_Config, path) == 8)
+#assert(offset_of(Database_Config, experimental_features) == 16)
+#assert(offset_of(Database_Config, vfs) == 24)
+#assert(offset_of(Database_Config, encryption_cipher) == 32)
+#assert(offset_of(Database_Config, encryption_hexkey) == 40)
+
 @(default_calling_convention = "c")
 foreign turso {
 	// Version - turso.h:72

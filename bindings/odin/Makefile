@@ -35,7 +35,12 @@ ODIN_FLAGS      := -extra-linker-flags:"$(ODIN_LINK_FLAGS)"
 # both libs would split turso_core state and crash on cross-lib pointer use.
 ODIN_SYNC_FLAGS := $(ODIN_FLAGS) -define:TURSO_USE_SYNC_DYLIB=true
 
-.PHONY: help sdk-kit sdk-kit-release sync-sdk-kit sync-sdk-kit-release check test sync-test stress-test tsan-test example examples clean
+.PHONY: help sdk-kit sdk-kit-release sync-sdk-kit sync-sdk-kit-release check check-abi test sync-test stress-test tsan-test asan-test example examples clean
+
+# Path to the C ABI header the hand-written FFI (turso/raw/imports.odin)
+# mirrors, plus the pinned checksum recorded under abi/.
+TURSO_HEADER     := $(WORKSPACE)/sdk-kit/turso.h
+TURSO_HEADER_SHA := abi/turso.h.sha256
 
 help:
 	@echo "Targets:"
@@ -43,7 +48,8 @@ help:
 	@echo "  sdk-kit-release       Build the local-DB C ABI library (release profile, --release) via cargo"
 	@echo "  sync-sdk-kit          Build the sync-engine C ABI library (debug profile) via cargo"
 	@echo "  sync-sdk-kit-release  Build the sync-engine C ABI library (release profile) via cargo"
-	@echo "  check                 odin check on turso, sync, tests, every example dir"
+	@echo "  check-abi             Fail if sdk-kit/turso.h drifted from the pinned checksum (run first by check)"
+	@echo "  check                 check-abi, then odin check on turso, sync, tests, every example dir"
 	@echo "  test                  Build and run the local-DB test runner"
 	@echo "  sync-test             Build and run the sync test runner"
 	@echo "  stress-test           Build and run the test binary with the long iteration count"
@@ -51,6 +57,8 @@ help:
 	@echo "                        without the ThreadSanitizer slowdown."
 	@echo "  tsan-test             Same as stress-test plus -sanitize:thread. Race reports"
 	@echo "                        exit non-zero. Intended for nightly or workflow_dispatch CI."
+	@echo "  asan-test             Local-DB suite under -sanitize:address (Linux CI; macOS has a"
+	@echo "                        known clang_rt version skew - see the target comment)."
 	@echo "  example               Run the minimal example"
 	@echo "  examples              Run every example"
 	@echo "  clean                 Remove odin build outputs"
@@ -75,7 +83,36 @@ sync-sdk-kit-release:
 	cd $(WORKSPACE) && cargo build -p turso_sync_sdk_kit --release
 	@test -f $(SDK_KIT_TARGET_RELEASE)/$(LIB_SYNC_FILE) || (echo "missing $(LIB_SYNC_FILE) in $(SDK_KIT_TARGET_RELEASE)" && exit 1)
 
-check:
+# check-abi guards against silent FFI drift. turso/raw/imports.odin is a
+# hand-written 1:1 mirror of sdk-kit/turso.h with no codegen; if the header
+# changes and imports.odin is not updated to match, every call across the FFI
+# is undefined behaviour. We pin the header's SHA-256 in abi/turso.h.sha256 and
+# fail loudly when the live header no longer matches. The maintainer must then
+# diff the header, reconcile turso/raw/imports.odin (signatures, structs, enums,
+# and the #assert layout pins), and re-pin via:
+#   (cd $(WORKSPACE) && shasum -a 256 sdk-kit/turso.h) > bindings/odin/$(TURSO_HEADER_SHA)
+check-abi:
+	@test -f "$(TURSO_HEADER)" || { echo "ABI CHECK FAILED: header not found at $(TURSO_HEADER)"; exit 1; }
+	@test -f "$(TURSO_HEADER_SHA)" || { echo "ABI CHECK FAILED: pinned checksum not found at $(TURSO_HEADER_SHA)"; exit 1; }
+	@pinned=`awk '{print $$1; exit}' "$(TURSO_HEADER_SHA)"`; \
+	actual=`shasum -a 256 "$(TURSO_HEADER)" | awk '{print $$1}'`; \
+	if [ "$$pinned" != "$$actual" ]; then \
+		echo "================================================================"; \
+		echo "ABI CHECK FAILED: sdk-kit/turso.h has drifted from the pinned hash."; \
+		echo "  pinned: $$pinned"; \
+		echo "  actual: $$actual"; \
+		echo ""; \
+		echo "The hand-written FFI in turso/raw/imports.odin mirrors turso.h 1:1"; \
+		echo "and is NOT regenerated. Re-verify imports.odin against the new"; \
+		echo "header (proc signatures, struct fields + #assert layout pins, enums),"; \
+		echo "then re-pin the checksum with:"; \
+		echo "  (cd $(WORKSPACE) && shasum -a 256 sdk-kit/turso.h) > bindings/odin/$(TURSO_HEADER_SHA)"; \
+		echo "================================================================"; \
+		exit 1; \
+	fi
+	@echo "ABI check OK: sdk-kit/turso.h matches the pinned checksum."
+
+check: check-abi
 	odin check turso -no-entry-point
 	odin check turso/sync -no-entry-point -define:TURSO_USE_SYNC_DYLIB=true
 	odin check turso/sync/curlhttp -no-entry-point -define:TURSO_USE_SYNC_DYLIB=true
@@ -103,6 +140,15 @@ stress-test: sdk-kit
 # longer than `make test`.
 tsan-test: sdk-kit
 	odin run tests $(ODIN_FLAGS) -sanitize:thread -define:TURSO_TSAN_STRESS=true -out:tsan_tests.bin
+
+# asan-test builds the local-DB suite with AddressSanitizer (heap overflow,
+# use-after-free, double-free at the binding boundary). Intended for Linux CI,
+# where Odin's bundled-LLVM ASan ABI matches the system clang_rt. On macOS the
+# link currently fails with an `___asan_version_mismatch_check_v*` undefined
+# symbol because Apple's clang_rt version skews from Odin's LLVM; rely on TSan
+# plus the leak-tracking allocator (always on in `make test`) for local runs.
+asan-test: sdk-kit
+	odin run tests $(ODIN_FLAGS) -sanitize:address -out:asan_tests.bin
 
 example: sdk-kit
 	odin run examples/minimal $(ODIN_FLAGS) -out:minimal.bin

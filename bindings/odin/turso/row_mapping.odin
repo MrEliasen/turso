@@ -140,7 +140,14 @@ conn_query_one_struct :: proc(conn: Connection, sql: string, out: ^$T, args: ..B
 
 	if se, sok := stmt_scan_struct(stmt, out, allocator); !sok { return se, false }
 
-	sr2, _, _ := step(stmt)
+	// Probe for a second row. An IOERR/CORRUPT/BUSY here must surface as an
+	// error rather than being mistaken for "exactly one row"; capture step's
+	// status instead of discarding it.
+	sr2, e4, ok4 := step(stmt)
+	if !ok4 {
+		free_owned_out(out, allocator)
+		return e4, false
+	}
 	if sr2 == .Row {
 		free_owned_out(out, allocator)
 		return make_error(.ERROR, "conn_query_one_struct", "expected exactly one row, got multiple", sql), false
@@ -169,7 +176,14 @@ conn_query_optional_struct :: proc(conn: Connection, sql: string, out: ^$T, args
 
 	if se, sok := stmt_scan_struct(stmt, out, allocator); !sok { return false, se, false }
 
-	sr2, _, _ := step(stmt)
+	// Probe for a second row. An IOERR/CORRUPT/BUSY here must surface as an
+	// error rather than being mistaken for "exactly one row"; capture step's
+	// status instead of discarding it.
+	sr2, e4, ok4 := step(stmt)
+	if !ok4 {
+		free_owned_out(out, allocator)
+		return false, e4, false
+	}
 	if sr2 == .Row {
 		free_owned_out(out, allocator)
 		return false, make_error(.ERROR, "conn_query_optional_struct", "expected at most one row, got multiple", sql), false

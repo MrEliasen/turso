@@ -12,24 +12,42 @@ bind_status :: proc(stmt: Statement, code: Status_Code, op: string) -> (Error, b
 	return make_error(code, op, name, stmt.sql), false
 }
 
+// must_be_valid_position rejects a non-positive bind position. Positional
+// parameters are 1-based; without this guard the `uint(position)` cast in the
+// binders would turn a negative position into a huge unsigned value and a
+// position of 0 would slip through to the engine, both silent misuses.
+@(private)
+must_be_valid_position :: proc(position: int, op: string) -> (Error, bool) {
+	if position <= 0 {
+		msg := fmt.aprintf("bind position must be >= 1 (1-based), got %d", position)
+		defer delete(msg)
+		return make_error(.MISUSE, op, msg), false
+	}
+	return error_none(), true
+}
+
 stmt_bind_null :: proc(stmt: Statement, position: int) -> (Error, bool) {
 	if stmt.handle == nil { return make_error(.MISUSE, "stmt_bind_null", "statement is not open"), false }
+	if e, ok := must_be_valid_position(position, "stmt_bind_null"); !ok { return e, false }
 	return bind_status(stmt, raw.turso_statement_bind_positional_null(stmt.handle, uint(position)), "stmt_bind_null")
 }
 
 stmt_bind_int :: proc(stmt: Statement, position: int, value: i64) -> (Error, bool) {
 	if stmt.handle == nil { return make_error(.MISUSE, "stmt_bind_int", "statement is not open"), false }
+	if e, ok := must_be_valid_position(position, "stmt_bind_int"); !ok { return e, false }
 	return bind_status(stmt, raw.turso_statement_bind_positional_int(stmt.handle, uint(position), value), "stmt_bind_int")
 }
 
 stmt_bind_double :: proc(stmt: Statement, position: int, value: f64) -> (Error, bool) {
 	if stmt.handle == nil { return make_error(.MISUSE, "stmt_bind_double", "statement is not open"), false }
+	if e, ok := must_be_valid_position(position, "stmt_bind_double"); !ok { return e, false }
 	return bind_status(stmt, raw.turso_statement_bind_positional_double(stmt.handle, uint(position), value), "stmt_bind_double")
 }
 
 // Turso copies the payload internally - caller does not need to extend value's lifetime.
 stmt_bind_text :: proc(stmt: Statement, position: int, value: string) -> (Error, bool) {
 	if stmt.handle == nil { return make_error(.MISUSE, "stmt_bind_text", "statement is not open"), false }
+	if e, ok := must_be_valid_position(position, "stmt_bind_text"); !ok { return e, false }
 	ptr: [^]u8 = nil
 	if len(value) > 0 { ptr = raw_data(value) }
 	code := raw.turso_statement_bind_positional_text(stmt.handle, uint(position), ptr, uint(len(value)))
@@ -38,6 +56,7 @@ stmt_bind_text :: proc(stmt: Statement, position: int, value: string) -> (Error,
 
 stmt_bind_blob :: proc(stmt: Statement, position: int, value: []u8) -> (Error, bool) {
 	if stmt.handle == nil { return make_error(.MISUSE, "stmt_bind_blob", "statement is not open"), false }
+	if e, ok := must_be_valid_position(position, "stmt_bind_blob"); !ok { return e, false }
 	ptr: [^]u8 = nil
 	if len(value) > 0 { ptr = raw_data(value) }
 	code := raw.turso_statement_bind_positional_blob(stmt.handle, uint(position), ptr, uint(len(value)))

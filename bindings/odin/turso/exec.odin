@@ -1,5 +1,7 @@
 package turso
 
+import "core:fmt"
+
 // conn_exec prepares a single statement, executes it, and finalizes. Returns
 // rows-affected. Only the first statement in `sql` is compiled; trailing text
 // is ignored — use conn_exec_batch if you need to run a multi-statement
@@ -58,6 +60,12 @@ conn_exec_batch :: proc(conn: Connection, sql: string) -> (rows: u64, err: Error
 		error_destroy(&fe)
 		if !eok { return total, ee, false }
 		total += executed
+		// Guard the parser's tail offset before reslicing. tail == 0 on an open
+		// statement would loop forever; tail > len(remaining) would panic the
+		// slice. Either is a contract violation from the C ABI, not valid input.
+		if tail <= 0 || tail > len(remaining) {
+			return total, make_error(.ERROR, "conn_exec_batch", "parser returned an invalid tail offset", sql), false
+		}
 		remaining = remaining[tail:]
 	}
 	return total, error_none(), true
@@ -78,6 +86,15 @@ conn_scalar_i64 :: proc(conn: Connection, sql: string, args: ..Bind_Arg) -> (val
 	if !ok3 { return 0, e3, false }
 	if sr != .Row {
 		return 0, make_error(.ERROR, "conn_scalar_i64", "query returned no rows", sql), false
+	}
+	// stmt_get_int yields 0 for NULL/TEXT/REAL/BLOB, which would silently
+	// masquerade as a real integer result. Require the column to actually be
+	// INTEGER and surface a typed error naming the real kind otherwise.
+	kind := stmt_value_kind(stmt, 0)
+	if kind != .INTEGER {
+		msg := fmt.aprintf("expected INTEGER result, got %v", kind)
+		defer delete(msg)
+		return 0, make_error(.ERROR, "conn_scalar_i64", msg, sql), false
 	}
 	return stmt_get_int(stmt, 0), error_none(), true
 }

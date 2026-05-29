@@ -251,3 +251,54 @@ test_curlhttp_rejects_response_exceeding_max_bytes_via_streaming :: proc() {
 	expect_eq(len(resp.body), 0, "rejected response must not surface partial body")
 	expect_true(strings.contains(msg, "response exceeded"), fmt.tprintf("expected typed 'response exceeded' message, got: %s", msg))
 }
+
+// Boundary pin for the streaming hard cap accounting. A streamed body whose
+// length is EXACTLY MAX_RESPONSE_BYTES must be accepted: the write_callback
+// rejects only when the running total would EXCEED the cap (`>`, not `>=`).
+// This locks the off-by-one in case the comparison is ever changed, and it is
+// the case the existing oversize tests (cap=256, body=1024) do not exercise.
+// Content-Length is omitted so the body travels through the write_callback cap
+// rather than being pre-rejected by CURLOPT_MAXFILESIZE_LARGE.
+test_curlhttp_streaming_response_exactly_at_cap_is_accepted :: proc() {
+	saved_cap := curlhttp.MAX_RESPONSE_BYTES
+	defer curlhttp.MAX_RESPONSE_BYTES = saved_cap
+	curlhttp.MAX_RESPONSE_BYTES = 512
+
+	body := strings.repeat("y", 512, context.temp_allocator)
+	s, t, port := start_curl_test_server(200, body, omit_content_length = true)
+	defer stop_curl_test_server(s, t)
+
+	req := sync_pkg.HTTP_Request{
+		url    = fmt.tprintf("http://127.0.0.1:%d/atcap", port),
+		method = "GET",
+	}
+	resp, msg, ok := curlhttp.roundtrip(nil, req, context.temp_allocator)
+	expect_true(ok, fmt.tprintf("body exactly at cap must be accepted, got: %s", msg))
+	expect_eq(resp.status, i32(200), "status passed through for at-cap body")
+	expect_eq(len(resp.body), 512, "full at-cap body must be buffered")
+}
+
+// Boundary pin: one byte over the cap must be rejected via the streaming hard
+// cap. Together with the at-cap test above this brackets the exact threshold
+// and exercises the i64 accounting (a 32-bit-truncated cap would mis-handle the
+// comparison once a caller raises MAX_RESPONSE_BYTES past 2 GiB on a 32-bit
+// host; bracketing the threshold here documents and guards the intended math).
+test_curlhttp_streaming_response_one_over_cap_is_rejected :: proc() {
+	saved_cap := curlhttp.MAX_RESPONSE_BYTES
+	defer curlhttp.MAX_RESPONSE_BYTES = saved_cap
+	curlhttp.MAX_RESPONSE_BYTES = 512
+
+	body := strings.repeat("z", 513, context.temp_allocator)
+	s, t, port := start_curl_test_server(200, body, omit_content_length = true)
+	defer stop_curl_test_server(s, t)
+
+	req := sync_pkg.HTTP_Request{
+		url    = fmt.tprintf("http://127.0.0.1:%d/overcap", port),
+		method = "GET",
+	}
+	resp, msg, ok := curlhttp.roundtrip(nil, req, context.temp_allocator)
+	expect_false(ok, "body one byte over the cap must be rejected")
+	expect_eq(resp.status, i32(0), "no status on rejected response")
+	expect_eq(len(resp.body), 0, "rejected over-cap response must not surface a body")
+	expect_true(strings.contains(msg, "response exceeded"), fmt.tprintf("expected typed 'response exceeded' message, got: %s", msg))
+}

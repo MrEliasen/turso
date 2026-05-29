@@ -76,6 +76,13 @@ database_open :: proc(cfg: Database_Config) -> (Database, Error, bool) {
 	}
 
 	code = raw.turso_database_open(db_handle, &c_err)
+	// async open can yield TURSO_IO, but the C ABI has no turso_database_run_io
+	// to drive it; :memory: never hits this, so surface a clear error only here.
+	if code == .IO {
+		if c_err != nil { raw.turso_str_deinit(c_err) }
+		raw.turso_database_deinit(db_handle)
+		return Database{}, make_error(.MISUSE, "turso_database_open", "async_io open requires I/O that the current C ABI cannot drive (no turso_database_run_io); use async_io=false for file-backed databases", "", cfg.path), false
+	}
 	if code != .OK {
 		raw.turso_database_deinit(db_handle)
 		return Database{}, error_from_status(code, c_err, "turso_database_open", "", cfg.path), false

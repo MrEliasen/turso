@@ -32,6 +32,8 @@ ALL_TESTS := [?]Test_Entry{
 	{"test_curlhttp_custom_method_delete",                     test_curlhttp_custom_method_delete},
 	{"test_curlhttp_rejects_response_exceeding_max_bytes_via_content_length", test_curlhttp_rejects_response_exceeding_max_bytes_via_content_length},
 	{"test_curlhttp_rejects_response_exceeding_max_bytes_via_streaming",      test_curlhttp_rejects_response_exceeding_max_bytes_via_streaming},
+	{"test_curlhttp_streaming_response_exactly_at_cap_is_accepted",          test_curlhttp_streaming_response_exactly_at_cap_is_accepted},
+	{"test_curlhttp_streaming_response_one_over_cap_is_rejected",            test_curlhttp_streaming_response_one_over_cap_is_rejected},
 	{"test_http_response_chunks_empty_body",                   test_http_response_chunks_empty_body},
 	{"test_http_response_chunks_smaller_than_chunk",           test_http_response_chunks_smaller_than_chunk},
 	{"test_http_response_chunks_exact_multiple",               test_http_response_chunks_exact_multiple},

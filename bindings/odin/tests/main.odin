@@ -82,6 +82,9 @@ ALL_TESTS := [?]Test_Entry{
 	{"test_conn_query_optional_struct_one_row",          test_conn_query_optional_struct_one_row},
 	{"test_conn_query_all_struct",                       test_conn_query_all_struct},
 
+	// async_io is a supported flag: it works for :memory: and the step_once/
+	// run_io event-loop path. database_open returns a clear error only if a
+	// file-backed open actually yields un-drivable I/O (see connection.odin).
 	{"test_async_io_basic_operations",     test_async_io_basic_operations},
 	{"test_async_io_step_iteration",       test_async_io_step_iteration},
 	{"test_async_io_with_parameter_binding", test_async_io_with_parameter_binding},
@@ -171,9 +174,25 @@ ALL_TESTS := [?]Test_Entry{
 
 	// Multi-statement exec (exec_batch_test.odin). Closed-handle MISUSE for
 	// conn_exec_batch is covered by test_closed_connection_exec_apis_return_misuse.
+	// [A3] the invalid parser-tail-offset guard is a defensive check against a
+	// C ABI contract violation (tail==0 on an open statement, or tail beyond
+	// the remaining length); it is not deterministically triggerable from Odin,
+	// so these existing valid-input tests stand as its regression coverage.
 	{"test_exec_batch_runs_ddl_plus_inserts",                  test_exec_batch_runs_ddl_plus_inserts},
 	{"test_exec_batch_stops_on_error",                         test_exec_batch_stops_on_error},
 	{"test_exec_batch_with_only_whitespace_succeeds",          test_exec_batch_with_only_whitespace_succeeds},
+
+	// [A4] conn_scalar_i64 requires an INTEGER result (scalar_kind_test.odin).
+	{"test_conn_scalar_i64_integer_result",      test_conn_scalar_i64_integer_result},
+	{"test_conn_scalar_i64_text_result_errors",  test_conn_scalar_i64_text_result_errors},
+	{"test_conn_scalar_i64_real_result_errors",  test_conn_scalar_i64_real_result_errors},
+	{"test_conn_scalar_i64_null_result_errors",  test_conn_scalar_i64_null_result_errors},
+
+	// [A5] positional bind rejects non-positive position (bind_position_test.odin).
+	{"test_bind_int_zero_position_returns_misuse",          test_bind_int_zero_position_returns_misuse},
+	{"test_bind_int_negative_position_returns_misuse",      test_bind_int_negative_position_returns_misuse},
+	{"test_bind_all_kinds_reject_non_positive_position",    test_bind_all_kinds_reject_non_positive_position},
+	{"test_bind_int_position_one_still_works",              test_bind_int_position_one_still_works},
 
 	// M1 ownership regression (statement_sql_ownership_test.odin).
 	{"test_prepare_owns_sql_when_caller_mutates_buffer",            test_prepare_owns_sql_when_caller_mutates_buffer},

@@ -52,7 +52,13 @@ MAX_RESPONSE_BYTES: i64 = 256 * 1024 * 1024
 Curl_Write_State :: struct {
 	buf:       ^[dynamic]u8,
 	allocator: mem.Allocator,
-	max_bytes: int,
+	// max_bytes mirrors MAX_RESPONSE_BYTES (an i64) and MUST stay i64 so the
+	// streaming cap below is computed at the same width as the off_t passed to
+	// CURLOPT_MAXFILESIZE_LARGE. A narrower `int` truncates on a 32-bit host:
+	// `int(3 * 1024 * 1024 * 1024)` wraps negative, the `> 0` guard turns the
+	// hard cap off, and a server that omits Content-Length can then stream
+	// unbounded data past the cap the caller asked for.
+	max_bytes: i64,
 	ok:        bool,
 	too_large: bool,
 }
@@ -62,17 +68,19 @@ write_callback :: proc "c" (data: rawptr, size: c.size_t, nmemb: c.size_t, userd
 	context = runtime.default_context()
 	state := (^Curl_Write_State)(userdata)
 	context.allocator = state.allocator
-	total := int(size) * int(nmemb)
+	// libcurl guarantees size*nmemb fits in size_t; do the arithmetic in i64 so
+	// the cap comparison can never overflow regardless of host int width.
+	total := i64(size) * i64(nmemb)
 	if total == 0 { return 0 }
 	// Hard cap: if appending this chunk would push the buffer past max_bytes,
 	// flag the request and abort the transfer. The remote may have lied about
 	// (or omitted) Content-Length, so MAXFILESIZE_LARGE alone is not sufficient.
-	if state.max_bytes > 0 && len(state.buf) + total > state.max_bytes {
+	if state.max_bytes > 0 && i64(len(state.buf)) + total > state.max_bytes {
 		state.ok = false
 		state.too_large = true
 		return 0
 	}
-	src := ([^]u8)(data)[:total]
+	src := ([^]u8)(data)[:int(total)]
 	if _, err := append(state.buf, ..src); err != nil {
 		state.ok = false
 		return 0
@@ -170,7 +178,10 @@ roundtrip :: proc(user_data: rawptr, req: sync.HTTP_Request, allocator: mem.Allo
 	state := Curl_Write_State{
 		buf       = &body_buf,
 		allocator = allocator,
-		max_bytes = int(MAX_RESPONSE_BYTES),
+		// i64 throughout: no truncation of the cap on a 32-bit host (see
+		// Curl_Write_State.max_bytes). Mirrors the off_t handed to
+		// CURLOPT_MAXFILESIZE_LARGE so both defence layers use the same limit.
+		max_bytes = MAX_RESPONSE_BYTES,
 		ok        = true,
 	}
 	if rc := curl.easy_setopt(handle, curl.option.WRITEFUNCTION, write_callback); rc != .E_OK {
